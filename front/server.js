@@ -69,6 +69,40 @@ fastify.post("/api/complete", async (request, reply) => {
   }
 });
 
+
+fastify.post("/api/respond", async (request, reply) => {
+  const {
+    input,
+    model,
+    temperature,
+    top_p,
+    top_k,
+    frequency_penalty,
+    presence_penalty,
+    max_tokens
+  } = request.body;
+
+  const payload = {
+    model,
+    input,
+    temperature,
+    top_p,
+    top_k,
+    frequency_penalty,
+    presence_penalty,
+    max_output_tokens: max_tokens
+  };
+
+  const res = await fetch("http://127.0.0.1:1234/v1/responses", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await res.json();
+  reply.send(data);
+});
+
 /* ========= START ========= */
 
 const PORT = 3000;
