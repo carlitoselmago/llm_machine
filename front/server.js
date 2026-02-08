@@ -12,7 +12,7 @@ const __dirname = path.dirname(__filename);
 // LM Studio / OpenAI-compatible endpoint
 // example: http://10.0.0.5:1234/v1/completions
 const LLM_API_URL = "http://127.0.0.1:1234/v1/completions";
-
+//const LLM_API_URL = "http://192.168.100.133:11434/api/generate"; //ollama test
 // Optional API key (LM Studio usually ignores it)
 const LLM_API_KEY = "";
 
@@ -32,8 +32,9 @@ fastify.post("/api/complete", async (request, reply) => {
     temperature = 0.7,
     max_tokens = 200,
     top_p = 1,
-    frequency_penalty = 0,
-    presence_penalty = 0
+    top_k= 10,
+    //frequency_penalty = 0,
+    //presence_penalty = 0
   } = request.body;
 
   if (!prompt || !model) {
@@ -46,8 +47,9 @@ fastify.post("/api/complete", async (request, reply) => {
     temperature,
     max_tokens,
     top_p,
-    frequency_penalty,
-    presence_penalty
+    top_k,
+    //frequency_penalty,
+    //presence_penalty
   };
 
   try {
@@ -69,6 +71,62 @@ fastify.post("/api/complete", async (request, reply) => {
   }
 });
 
+/*
+//Ollama
+fastify.post("/api/complete", async (request, reply) => {
+  const {
+    prompt = "",
+    model = "qwen-neurotic-es-completion:latest",
+    temperature = 0.7,
+    max_tokens = 20,
+    top_p = 1,
+    frequency_penalty = 0,
+    presence_penalty = 0
+  } = request.body;
+
+  if (!prompt.trim()) {
+    return reply.code(400).send({ error: "Prompt is empty" });
+  }
+
+  let ollamaResponse;
+
+  try {
+    ollamaResponse = await fetch(LLM_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: false,
+        num_predict: max_tokens,
+        options: {
+          temperature,
+          top_p,
+          repeat_penalty: Math.max(
+            1.0,
+            1.0 + frequency_penalty + presence_penalty
+          )
+        }
+      })
+    });
+  } catch (err) {
+    return reply.code(502).send({ error: "Ollama not reachable" });
+  }
+
+  if (!ollamaResponse.ok) {
+    const text = await ollamaResponse.text();
+    return reply.code(500).send({ error: text });
+  }
+
+  const data = await ollamaResponse.json();
+
+  reply.send({
+    text: data.response ?? ""
+  });
+});
+*/
 
 fastify.post("/api/respond", async (request, reply) => {
   const {

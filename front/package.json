@@ -9,9 +9,9 @@
     "@fastify/static": "^9.0.0",
     "fastify": "^5.7.4"
   },
-  "description": "",
   "main": "server.js",
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "description": ""
 }
