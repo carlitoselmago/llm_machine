@@ -23,6 +23,8 @@ fastify.register(import("@fastify/static"), {
   prefix: "/"
 });
 
+
+
 /* ========= API ========= */
 
 fastify.post("/api/complete", async (request, reply) => {
@@ -33,8 +35,8 @@ fastify.post("/api/complete", async (request, reply) => {
     max_tokens = 200,
     top_p = 1,
     top_k= 10,
-    //frequency_penalty = 0,
-    //presence_penalty = 0
+    frequency_penalty = 0,
+    presence_penalty = 0
   } = request.body;
 
   if (!prompt || !model) {
@@ -48,11 +50,13 @@ fastify.post("/api/complete", async (request, reply) => {
     max_tokens,
     top_p,
     top_k,
-    //frequency_penalty,
-    //presence_penalty
+    frequency_penalty,
+    presence_penalty,
+    stream : true
   };
 
   try {
+    /*
     const res = await fetch(LLM_API_URL, {
       method: "POST",
       headers: {
@@ -65,6 +69,28 @@ fastify.post("/api/complete", async (request, reply) => {
     const data = await res.json();
 
     reply.send(data);
+  } catch (err) {
+    fastify.log.error(err);
+    reply.code(500).send({ error: "LLM backend error" });
+  }
+    */
+   const res = await fetch(LLM_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive"
+  });
+
+  for await (const chunk of res.body) {
+    reply.raw.write(chunk);
+  }
+
+  reply.raw.end();
   } catch (err) {
     fastify.log.error(err);
     reply.code(500).send({ error: "LLM backend error" });
@@ -159,6 +185,21 @@ fastify.post("/api/respond", async (request, reply) => {
 
   const data = await res.json();
   reply.send(data);
+});
+
+fastify.get("/api/models", async (request, reply) => {
+  try {
+    const res = await fetch("http://127.0.0.1:1234/v1/models");
+    const data = await res.json();
+
+    // OpenAI-style: { data: [{ id: "model-name", ... }] }
+    const models = (data.data || []).map(m => m.id);
+
+    reply.send(models);
+  } catch (err) {
+    fastify.log.error(err);
+    reply.code(500).send({ error: "Could not fetch models" });
+  }
 });
 
 /* ========= START ========= */
