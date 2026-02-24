@@ -1,0 +1,26 @@
+﻿services:
+  controller:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: llm-orchestrator-controller
+    ports:
+      - "8080:8080"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      MODELS_DIR: "/models"
+      ADMIN_USERNAME: "admin"
+      ADMIN_PASSWORD: "workshop"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      CONTAINER_NAME_PREFIX: "llmorch"
+    volumes:
+      - ./models:/models
+      - /var/run/docker.sock:/var/run/docker.sock
+    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    restart: unless-stopped

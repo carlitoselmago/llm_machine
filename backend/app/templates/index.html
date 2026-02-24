@@ -1,0 +1,190 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title }}</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: #111827; color: #f9fafb; margin: 0; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    h1, h2 { margin: 0 0 12px; }
+    .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+    .card { background: #1f2937; border: 1px solid #374151; border-radius: 10px; padding: 16px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input, button, select { border-radius: 8px; border: 1px solid #4b5563; padding: 8px 10px; background: #111827; color: #f9fafb; }
+    button { cursor: pointer; }
+    button:hover { background: #1f2937; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; border-bottom: 1px solid #374151; padding: 8px; vertical-align: top; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .running { background: #065f46; }
+    .stopped { background: #4b5563; }
+    .error { color: #fca5a5; }
+    .muted { color: #9ca3af; }
+    pre { white-space: pre-wrap; background: #111827; border: 1px solid #374151; padding: 10px; border-radius: 8px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>LLM Orchestrator Admin</h1>
+    <p class="muted">Basic-auth protected workshop admin. Manage Hugging Face downloads, GPU assignments, and vLLM containers.</p>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Download Model</h2>
+        <div class="row">
+          <input id="repoId" type="text" placeholder="meta-llama/Llama-3.2-1B-Instruct" style="flex:1; min-width:280px" />
+          <button id="downloadBtn">Download</button>
+          <button id="refreshBtn">Refresh</button>
+        </div>
+        <p id="downloadStatus" class="muted"></p>
+      </section>
+
+      <section class="card">
+        <h2>System Status</h2>
+        <div id="healthLine" class="muted">Loading...</div>
+        <h3>GPUs</h3>
+        <div id="gpus"></div>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top:16px">
+      <h2>Models</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Status</th>
+            <th>GPU</th>
+            <th>Container</th>
+            <th>Port</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="modelsBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <h2>Managed Containers</h2>
+      <pre id="containersDump">[]</pre>
+    </section>
+  </div>
+
+  <script>
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const detail = data?.detail || data?.error?.message || text || `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+      return data;
+    }
+
+    function shortId(value) {
+      if (!value) return '-';
+      return value.slice(0, 12);
+    }
+
+    async function refreshAll() {
+      try {
+        const [health, gpus, models, containers] = await Promise.all([
+          api('/api/admin/health'),
+          api('/api/admin/gpus'),
+          api('/api/admin/models'),
+          api('/api/admin/containers'),
+        ]);
+
+        document.getElementById('healthLine').textContent = `Status: ${health.status} | Docker: ${health.docker_connected} | GPUs: ${health.gpu_count}`;
+        document.getElementById('gpus').innerHTML = gpus.map(g =>
+          `<div>${g.gpu_id}: ${g.name} ${g.allocated ? '(allocated to ' + g.allocated_model_id + ')' : '(free)'}</div>`
+        ).join('') || '<div class="muted">No GPUs detected</div>';
+
+        const tbody = document.getElementById('modelsBody');
+        tbody.innerHTML = models.map(m => {
+          const statusBadge = m.running ? '<span class="badge running">running</span>' : '<span class="badge stopped">' + m.download_status + '</span>';
+          const err = m.error ? `<div class="error">${m.error}</div>` : '';
+          return `
+            <tr>
+              <td>
+                <div><strong>${m.model_id}</strong></div>
+                <div class="muted">${m.repo_id}</div>
+                ${err}
+              </td>
+              <td>${statusBadge}</td>
+              <td>${m.gpu_id || '-'}</td>
+              <td title="${m.container_id || ''}">${shortId(m.container_id)}</td>
+              <td>${m.port || '-'}</td>
+              <td>
+                <div class="row">
+                  <button onclick="startModel('${m.model_id}')" ${m.running || !m.downloaded ? 'disabled' : ''}>Start</button>
+                  <button onclick="stopModel('${m.model_id}')" ${m.running ? '' : 'disabled'}>Stop</button>
+                  <button onclick="deleteModel('${m.model_id}')" ${m.running ? 'disabled' : ''}>Delete</button>
+                </div>
+              </td>
+            </tr>`;
+        }).join('');
+
+        document.getElementById('containersDump').textContent = JSON.stringify(containers.containers, null, 2);
+      } catch (err) {
+        console.error(err);
+        document.getElementById('downloadStatus').textContent = err.message;
+      }
+    }
+
+    async function startModel(modelId) {
+      try {
+        await api(`/api/admin/models/${encodeURIComponent(modelId)}/start`, { method: 'POST', body: JSON.stringify({ model_id: modelId }) });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function stopModel(modelId) {
+      try {
+        await api(`/api/admin/models/${encodeURIComponent(modelId)}/stop`, { method: 'POST' });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function deleteModel(modelId) {
+      if (!confirm(`Delete ${modelId}?`)) return;
+      try {
+        await api(`/api/admin/models/${encodeURIComponent(modelId)}`, { method: 'DELETE' });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    document.getElementById('downloadBtn').addEventListener('click', async () => {
+      const repoId = document.getElementById('repoId').value.trim();
+      if (!repoId) return;
+      const status = document.getElementById('downloadStatus');
+      status.textContent = `Downloading ${repoId}...`;
+      try {
+        await api('/api/admin/models/download', { method: 'POST', body: JSON.stringify({ repo_id: repoId }) });
+        status.textContent = `Downloaded ${repoId}`;
+        document.getElementById('repoId').value = '';
+        await refreshAll();
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    });
+
+    document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+    refreshAll();
+    setInterval(refreshAll, 8000);
+  </script>
+</body>
+</html>
