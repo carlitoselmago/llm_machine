@@ -92,6 +92,7 @@ class DockerManager:
         dtype: str | None = None,
         max_model_len: int | None = None,
         gpu_memory_utilization: float | None = None,
+        max_num_seqs: int | None = None,
     ) -> ManagedContainerRecord:
         self._require_client()
         container_name = f"{self.config.container_name_prefix}-{model_id}-{gpu_id}"
@@ -105,7 +106,7 @@ class DockerManager:
         if served_model_name:
             labels[self.config.label_served_model_name] = served_model_name
 
-        cmd = ["vllm", "serve", f"/models/{model_id}", "--port", str(self.config.vllm_internal_port)]
+        cmd = [f"/models/{model_id}", "--port", str(self.config.vllm_internal_port)]
         if served_model_name:
             cmd += ["--served-model-name", served_model_name]
         if trust_remote_code:
@@ -116,22 +117,42 @@ class DockerManager:
             cmd += ["--max-model-len", str(max_model_len)]
         if gpu_memory_utilization is not None:
             cmd += ["--gpu-memory-utilization", str(gpu_memory_utilization)]
+        if max_num_seqs is not None:
+            cmd += ["--max-num-seqs", str(max_num_seqs)]
 
-        try:
-            container = self.client.containers.run(
-                self.config.vllm_image,
-                command=cmd,
-                name=container_name,
-                detach=True,
-                remove=False,
-                labels=labels,
-                ports={f"{self.config.vllm_internal_port}/tcp": ("0.0.0.0", host_port)},
-                volumes={self.config.models_dir: {"bind": "/models", "mode": "rw"}},
-                device_requests=[DeviceRequest(count=1, capabilities=[["gpu"]], device_ids=[gpu_id])],
-                restart_policy={"Name": "unless-stopped"},
-            )
-        except APIError as exc:
-            raise RuntimeError(f"Failed to start vLLM container: {exc.explanation}") from exc
+        for attempt in (1, 2):
+            try:
+                container = self.client.containers.run(
+                    self.config.vllm_image,
+                    command=cmd,
+                    name=container_name,
+                    detach=True,
+                    remove=False,
+                    labels=labels,
+                    ports={f"{self.config.vllm_internal_port}/tcp": ("0.0.0.0", host_port)},
+                    volumes={self.config.models_dir: {"bind": "/models", "mode": "rw"}},
+                    device_requests=[DeviceRequest(device_ids=[gpu_id], capabilities=[["gpu"]])],
+                    restart_policy={"Name": "unless-stopped"},
+                )
+                break
+            except APIError as exc:
+                explanation = str(exc.explanation or exc)
+                lowered = explanation.lower()
+                cleaned = self._remove_stale_managed_container(container_name, model_id=model_id, gpu_id=gpu_id)
+                if attempt == 1 and "already in use by container" in lowered and cleaned:
+                    logger.warning("Removed stale container %s and retrying start", container_name)
+                    continue
+                if 'capabilities: [[gpu]]' in lowered:
+                    detail = (
+                        "Docker GPU runtime is unavailable. Install/configure NVIDIA Container Toolkit "
+                        "and restart Docker."
+                    )
+                    if cleaned:
+                        detail += f" Removed stale container {container_name} from failed start."
+                    raise RuntimeError(f"Failed to start vLLM container: {detail}") from exc
+                if cleaned:
+                    explanation = f"{explanation}. Removed stale container {container_name} from failed start."
+                raise RuntimeError(f"Failed to start vLLM container: {explanation}") from exc
 
         return ManagedContainerRecord(
             container_id=container.id,
@@ -144,12 +165,25 @@ class DockerManager:
             served_model_name=served_model_name,
         )
 
-    def wait_for_model_ready(self, host_port: int) -> None:
+    def wait_for_model_ready(self, host_port: int, *, container_id: str | None = None) -> None:
         deadline = time.time() + self.config.vllm_startup_timeout_seconds
         url = f"http://127.0.0.1:{host_port}/v1/models"
         last_error = "unknown"
+        restarting_hits = 0
         with httpx.Client(timeout=10.0) as client:
             while time.time() < deadline:
+                if container_id:
+                    status = self._get_container_status(container_id)
+                    if status in {"exited", "dead"}:
+                        reason = self._extract_container_failure_summary(container_id)
+                        raise RuntimeError(f"vLLM container exited before readiness: {reason}")
+                    if status == "restarting":
+                        restarting_hits += 1
+                        if restarting_hits >= 3:
+                            reason = self._extract_container_failure_summary(container_id)
+                            raise RuntimeError(f"vLLM container is restarting repeatedly: {reason}")
+                    else:
+                        restarting_hits = 0
                 try:
                     resp = client.get(url)
                     if resp.status_code < 500:
@@ -158,6 +192,9 @@ class DockerManager:
                 except Exception as exc:  # noqa: BLE001
                     last_error = str(exc)
                 time.sleep(self.config.vllm_health_poll_seconds)
+        if container_id:
+            reason = self._extract_container_failure_summary(container_id)
+            raise RuntimeError(f"Timed out waiting for vLLM readiness on port {host_port}: {last_error}. Last container error: {reason}")
         raise RuntimeError(f"Timed out waiting for vLLM readiness on port {host_port}: {last_error}")
 
     def stop_and_remove_container(self, container_id: str) -> None:
@@ -174,6 +211,66 @@ class DockerManager:
             container.remove(force=True)
         except (APIError, NotFound) as exc:
             raise RuntimeError(f"Failed to remove container {container_id}: {exc}") from exc
+
+    def _remove_stale_managed_container(self, container_name: str, *, model_id: str, gpu_id: str) -> bool:
+        self._require_client()
+        try:
+            container = self.client.containers.get(container_name)
+        except NotFound:
+            return False
+        except APIError:
+            return False
+
+        labels = container.labels or {}
+        if labels.get(self.config.managed_label_key) != "true":
+            return False
+        if labels.get(self.config.label_model_id) != model_id:
+            return False
+        if labels.get(self.config.label_gpu_id) != gpu_id:
+            return False
+
+        try:
+            container.reload()
+            if container.status == "running":
+                return False
+            container.remove(force=True)
+            return True
+        except APIError:
+            return False
+
+    def _get_container_status(self, container_id: str) -> str | None:
+        self._require_client()
+        try:
+            container = self.client.containers.get(container_id)
+            container.reload()
+            return container.status
+        except (NotFound, APIError):
+            return None
+
+    def _extract_container_failure_summary(self, container_id: str) -> str:
+        self._require_client()
+        try:
+            container = self.client.containers.get(container_id)
+            raw = container.logs(tail=200)
+        except (NotFound, APIError) as exc:
+            return f"unable to read container logs: {exc}"
+
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return "no logs available"
+
+        priority_patterns = (
+            "ValueError:",
+            "RuntimeError:",
+            "failed to",
+            "error:",
+        )
+        for pattern in priority_patterns:
+            for line in reversed(lines):
+                if pattern.lower() in line.lower():
+                    return line
+        return lines[-1]
 
     def find_free_host_port(self, used_ports: set[int]) -> int:
         for port in range(self.config.host_port_start, self.config.host_port_end + 1):

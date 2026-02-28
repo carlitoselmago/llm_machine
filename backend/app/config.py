@@ -4,6 +4,26 @@ import os
 from dataclasses import dataclass
 
 
+def _optional_float_env(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    return float(value)
+
+
+def _optional_int_env(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    return int(value)
+
+
 @dataclass(slots=True)
 class Config:
     host: str = "0.0.0.0"
@@ -26,6 +46,8 @@ class Config:
     request_timeout_seconds: float = 600.0
     vllm_startup_timeout_seconds: float = 600.0
     vllm_health_poll_seconds: float = 2.0
+    default_gpu_memory_utilization: float | None = None
+    default_max_num_seqs: int | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -44,4 +66,6 @@ class Config:
             request_timeout_seconds=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "600")),
             vllm_startup_timeout_seconds=float(os.getenv("VLLM_STARTUP_TIMEOUT_SECONDS", "600")),
             vllm_health_poll_seconds=float(os.getenv("VLLM_HEALTH_POLL_SECONDS", "2")),
+            default_gpu_memory_utilization=_optional_float_env("DEFAULT_GPU_MEMORY_UTILIZATION"),
+            default_max_num_seqs=_optional_int_env("DEFAULT_MAX_NUM_SEQS"),
         )

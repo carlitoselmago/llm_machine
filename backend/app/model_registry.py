@@ -162,6 +162,20 @@ class ModelRegistry:
             state.served_model_name = None
             return state.to_model_info()
 
+    def mark_start_failed(self, model_id: str, error: str) -> ModelInfo | None:
+        with self._lock:
+            state = self._models.get(model_id)
+            if state is None:
+                return None
+            state.running = False
+            state.container_id = None
+            state.gpu_id = None
+            state.port = None
+            state.endpoint = None
+            state.served_model_name = None
+            state.error = error
+            return state.to_model_info()
+
     def delete_model(self, model_id: str) -> None:
         with self._lock:
             self._models.pop(model_id, None)

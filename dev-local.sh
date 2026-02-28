@@ -35,6 +35,42 @@ export MODELS_DIR="$ROOT_DIR/models"
 export ADMIN_USERNAME="admin"
 export ADMIN_PASSWORD="workshop"
 export FRONT_STATIC_DIR="$ROOT_DIR/front/public"
+export DEFAULT_GPU_MEMORY_UTILIZATION="${DEFAULT_GPU_MEMORY_UTILIZATION:-0.65}"
+export DEFAULT_MAX_NUM_SEQS="${DEFAULT_MAX_NUM_SEQS:-64}"
+
+docker_config_dir="${DOCKER_CONFIG:-$HOME/.docker}"
+docker_config_file="$docker_config_dir/config.json"
+if [[ -f "$docker_config_file" ]]; then
+  creds_store="$(sed -n 's/.*"credsStore"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$docker_config_file" | head -n 1)"
+  if [[ -n "$creds_store" ]] && ! command -v "docker-credential-$creds_store" >/dev/null 2>&1; then
+    if [[ -z "${DOCKER_CONFIG:-}" ]]; then
+      local_docker_config="$ROOT_DIR/.docker-dev"
+      mkdir -p "$local_docker_config"
+      cat > "$local_docker_config/config.json" <<'JSON'
+{
+  "auths": {}
+}
+JSON
+      export DOCKER_CONFIG="$local_docker_config"
+      echo "[dev-local] Missing docker-credential-$creds_store; using local Docker config without credential helpers."
+    else
+      echo "[dev-local] DOCKER_CONFIG is set and references missing helper docker-credential-$creds_store."
+      echo "[dev-local] Update that config or unset DOCKER_CONFIG for local dev fallback."
+    fi
+  fi
+fi
+
+if [[ -z "${DOCKER_HOST:-}" ]]; then
+  rootless_sock="/run/user/$(id -u)/docker.sock"
+  if [[ ! -S /var/run/docker.sock && -S "$rootless_sock" ]]; then
+    export DOCKER_HOST="unix://$rootless_sock"
+    echo "[dev-local] Using rootless Docker socket: $DOCKER_HOST"
+  fi
+fi
+
+if [[ -z "${DOCKER_HOST:-}" && ! -S /var/run/docker.sock ]]; then
+  echo "[dev-local] Docker socket not found. Backend will start in degraded mode (model start/stop disabled)."
+fi
 
 echo "[dev-local] Starting FastAPI dev server on http://localhost:8080"
 cd backend

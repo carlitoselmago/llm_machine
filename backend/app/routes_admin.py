@@ -31,6 +31,24 @@ def _http_error_from_exc(exc: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail=msg)
     if isinstance(exc, RuntimeError):
         detail_lower = msg.lower()
+        if "docker daemon is unavailable" in detail_lower:
+            return HTTPException(status_code=503, detail=msg)
+        if "nvidia-smi not found" in detail_lower:
+            return HTTPException(status_code=503, detail=msg)
+        if "docker gpu runtime is unavailable" in detail_lower:
+            return HTTPException(status_code=503, detail=msg)
+        if "not supported by this vllm workflow" in detail_lower:
+            return HTTPException(status_code=400, detail=msg)
+        if "missing config.json/params.json required by vllm" in detail_lower:
+            return HTTPException(status_code=400, detail=msg)
+        if "free memory on device" in detail_lower or "gpu memory utilization" in detail_lower:
+            return HTTPException(status_code=409, detail=msg)
+        if "out of memory" in detail_lower or "cuda out of memory" in detail_lower:
+            return HTTPException(status_code=409, detail=msg)
+        if "max_num_seqs" in detail_lower:
+            return HTTPException(status_code=409, detail=msg)
+        if "container is restarting repeatedly" in detail_lower:
+            return HTTPException(status_code=409, detail=msg)
         if "already" in detail_lower or "not running" in detail_lower or "cannot be deleted" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
         if "no free gpu" in detail_lower or "no free host port" in detail_lower:
@@ -114,7 +132,7 @@ async def download_model(
 )
 async def start_model(
     model_id: str,
-    payload: Annotated[StartModelRequest | None, Body(default=None)] = None,
+    payload: Annotated[StartModelRequest | None, Body()] = None,
     services: AppServices = Depends(get_services),
 ) -> ModelInfo:
     options = payload or StartModelRequest(model_id=model_id)

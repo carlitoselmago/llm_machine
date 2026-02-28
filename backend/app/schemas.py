@@ -29,6 +29,7 @@ class StartModelRequest(BaseModel):
     dtype: str | None = None
     max_model_len: int | None = None
     gpu_memory_utilization: float | None = None
+    max_num_seqs: int | None = None
 
 
 class ModelInfo(BaseModel):

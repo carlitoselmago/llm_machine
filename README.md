@@ -65,9 +65,9 @@ Use this when you want fast iteration (auto-reload) on a Linux machine, without 
 Prereqs:
 
 - Python 3.11
-- Docker Engine running (the controller uses the Docker SDK via your local Docker daemon)
-- NVIDIA drivers available on the host (`nvidia-smi` works). Note: the controller currently calls `nvidia-smi` during startup, so it won’t boot cleanly on machines without NVIDIA drivers.
-- NVIDIA Container Toolkit (required if you want to actually start vLLM model containers)
+- Docker Engine running (required only for model lifecycle operations such as start/stop)
+- NVIDIA drivers available on the host (`nvidia-smi` works) and NVIDIA Container Toolkit (required only if you want to start vLLM model containers)
+- Without Docker/NVIDIA, the backend still starts in degraded mode for local UI/API development
 
 Start the FastAPI dev server (auto-reload):
 
@@ -81,11 +81,16 @@ Optional env vars:
 ```bash
 HF_TOKEN=your_token_if_needed ./dev-local.sh
 ADMIN_USERNAME=admin ADMIN_PASSWORD=workshop ./dev-local.sh
+DEFAULT_GPU_MEMORY_UTILIZATION=0.60 DEFAULT_MAX_NUM_SEQS=32 ./dev-local.sh
 ```
+
+`dev-local.sh` defaults `DEFAULT_GPU_MEMORY_UTILIZATION=0.65` and `DEFAULT_MAX_NUM_SEQS=64` for better stability on desktop GPUs. Lower them further (for example `0.60` and `32`) if vLLM reports CUDA OOM during warmup.
 
 Common gotcha (Docker permissions):
 
 - If you see Docker “permission denied” errors, make sure your user can run `docker ps` without `sudo` (e.g. add your user to the `docker` group and re-login).
+- `dev-local.sh` auto-detects rootless Docker at `/run/user/<uid>/docker.sock` and sets `DOCKER_HOST` when `/var/run/docker.sock` is missing.
+- If your Docker config uses a missing credential helper (for example `docker-credential-desktop` on Linux), `dev-local.sh` falls back to a local `DOCKER_CONFIG` without credential helpers for public image pulls.
 
 Quick local smoke checks:
 
@@ -239,6 +244,24 @@ It also requests GPU access using `gpus: all` and includes a `deploy` reservatio
 - Large models can take several minutes to initialize
 - Increase `VLLM_STARTUP_TIMEOUT_SECONDS` if needed
 - Check container logs:
+
+```bash
+docker logs <vllm-container-id>
+```
+
+### vLLM container keeps restarting on desktop GPU
+
+- If logs show `Free memory on device ... is less than desired GPU memory utilization`, reduce memory target
+- If logs show CUDA OOM during warmup with many dummy requests, also reduce sequence concurrency (`DEFAULT_MAX_NUM_SEQS`)
+- Local dev defaults are `DEFAULT_GPU_MEMORY_UTILIZATION=0.65` and `DEFAULT_MAX_NUM_SEQS=64`
+- For heavily used desktop GPUs, try lower values (for example `0.60` and `32`)
+
+### Model downloaded but not available in `/v1/models`
+
+- `/v1/models` shows only running models
+- GGUF folders are not supported by this vLLM workflow
+- Use a Hugging Face Transformers model with `config.json` (or Mistral `params.json`)
+- If needed, inspect crash logs:
 
 ```bash
 docker logs <vllm-container-id>

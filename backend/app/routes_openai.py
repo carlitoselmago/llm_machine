@@ -42,12 +42,16 @@ async def forward_openai_request(
     if not state.running or not state.endpoint:
         return openai_error(409, f"Model '{requested_model}' is downloaded but not running", code="model_not_running")
 
+    upstream_model = state.served_model_name or f"/models/{state.model_id}"
+    upstream_payload = dict(payload)
+    upstream_payload["model"] = upstream_model
+
     url = f"{state.endpoint}/v1{path}"
     headers = _filtered_headers(incoming_headers or {})
     headers.setdefault("content-type", "application/json")
 
     try:
-        request = services.http_client.build_request("POST", url, json=payload, headers=headers)
+        request = services.http_client.build_request("POST", url, json=upstream_payload, headers=headers)
         upstream = await services.http_client.send(request, stream=True)
     except httpx.TimeoutException:
         return openai_error(504, "Upstream model request timed out", error_type="timeout_error")
