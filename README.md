@@ -296,6 +296,7 @@ It also requests GPU access using `gpus: all` and includes a `deploy` reservatio
 - `install.sh` fallback: retries legacy builder, then starts controller in local mode (`dev-local.sh`) if build is still blocked
 - Local fallback logs: `/tmp/llm-machine-controller.log`
 - Local fallback PID file: `/tmp/llm-machine-controller.pid`
+- To force local mode directly (skip compose/build): `FORCE_LOCAL_CONTROLLER=1 ./install.sh`
 
 ### No GPUs detected
 

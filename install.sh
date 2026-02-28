@@ -284,6 +284,15 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 log "Starting services..."
+if [[ "${FORCE_LOCAL_CONTROLLER:-0}" == "1" ]]; then
+  log "FORCE_LOCAL_CONTROLLER=1, skipping Docker Compose build."
+  start_services_local_fallback
+  log "Controller UI: http://$(hostname -I | awk '{print $1}'):8080/"
+  log "Admin UI:      http://$(hostname -I | awk '{print $1}'):8080/admin"
+  log "OpenAI API:    http://$(hostname -I | awk '{print $1}'):8080/v1"
+  exit 0
+fi
+
 compose_result=0
 set +e
 start_services_with_compose
