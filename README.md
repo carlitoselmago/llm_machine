@@ -34,7 +34,7 @@ Browser (/ and /admin)
 
 One line install and execute for runpod:
 ```bash
-wget -O bootstrap-runpod.sh https://raw.githubusercontent.com/carlitoselmago/llm_machine/main/bootstrap-runpod.sh && chmod +x bootstrap-runpod.sh && ./bootstrap-runpod.sh
+wget -O bootstrap-runpod.sh https://github.com/carlitoselmago/llm_machine/raw/refs/heads/main/bootstrap-runpod.sh && chmod +x bootstrap-runpod.sh && ./bootstrap-runpod.sh
 ```
 
 ```bash
