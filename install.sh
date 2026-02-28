@@ -39,6 +39,16 @@ wait_for_docker() {
   return 1
 }
 
+launch_dockerd_manual() {
+  local dockerd_log="$1"
+  local dockerd_flags="$2"
+  if [[ -n "$SUDO" ]]; then
+    $SUDO nohup dockerd --host=unix:///var/run/docker.sock $dockerd_flags >"$dockerd_log" 2>&1 &
+  else
+    nohup dockerd --host=unix:///var/run/docker.sock $dockerd_flags >"$dockerd_log" 2>&1 &
+  fi
+}
+
 start_docker_without_systemd() {
   if docker info >/dev/null 2>&1; then
     return 0
@@ -61,19 +71,27 @@ start_docker_without_systemd() {
 
   local dockerd_log="${DOCKERD_LOG_PATH:-/tmp/dockerd.log}"
   local dockerd_flags="${DOCKERD_FLAGS:-}"
+  local dockerd_retry_flags="${DOCKERD_RETRY_FLAGS:---iptables=false --bridge=none --ip-forward=false --ip-masq=false --storage-driver=vfs}"
   mkdir -p /var/run
   log "systemd is unavailable; trying to start dockerd manually..."
-  if [[ -n "$SUDO" ]]; then
-    $SUDO nohup dockerd --host=unix:///var/run/docker.sock $dockerd_flags >"$dockerd_log" 2>&1 &
-  else
-    nohup dockerd --host=unix:///var/run/docker.sock $dockerd_flags >"$dockerd_log" 2>&1 &
-  fi
+  launch_dockerd_manual "$dockerd_log" "$dockerd_flags"
 
   export DOCKER_HOST="unix:///var/run/docker.sock"
   export DOCKER_SOCK_PATH="/var/run/docker.sock"
   if wait_for_docker 25 1; then
     log "dockerd is running (manual mode)."
     return 0
+  fi
+
+  if grep -qiE 'iptables|NAT chain DOCKER|Permission denied' "$dockerd_log" 2>/dev/null; then
+    log "dockerd failed with iptables/bridge permissions; retrying in reduced-network mode..."
+    pkill -f 'dockerd --host=unix:///var/run/docker.sock' >/dev/null 2>&1 || true
+    sleep 1
+    launch_dockerd_manual "$dockerd_log" "$dockerd_retry_flags"
+    if wait_for_docker 25 1; then
+      log "dockerd is running (reduced-network mode)."
+      return 0
+    fi
   fi
 
   log "dockerd failed to start in this environment."

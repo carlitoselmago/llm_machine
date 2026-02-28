@@ -282,6 +282,10 @@ It also requests GPU access using `gpus: all` and includes a `deploy` reservatio
   - `DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock`
   - `DOCKER_SOCK_PATH=/run/user/$(id -u)/docker.sock`
 - In non-systemd pods, `install.sh` tries `service docker start` and then manual `dockerd` start; if both fail, the pod likely lacks required privileges for Docker daemon operation
+- If `dockerd` fails with iptables/NAT permission errors, `install.sh` now retries with reduced-network flags (`--iptables=false --bridge=none --ip-forward=false --ip-masq=false --storage-driver=vfs`)
+- You can override manual daemon flags with:
+  - `DOCKERD_FLAGS="..." ./install.sh`
+  - `DOCKERD_RETRY_FLAGS="..." ./install.sh`
 
 ### No GPUs detected
 
