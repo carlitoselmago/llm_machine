@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 log() {
@@ -7,6 +7,115 @@ log() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+COMPOSE_CMD=()
+
+resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker compose)
+    return
+  fi
+  if need_cmd docker-compose; then
+    COMPOSE_CMD=(docker-compose)
+    return
+  fi
+}
+
+has_systemd() {
+  [[ -d /run/systemd/system ]] && need_cmd systemctl
+}
+
+wait_for_docker() {
+  local retries="${1:-20}"
+  local sleep_seconds="${2:-1}"
+  local i
+  for ((i = 1; i <= retries; i++)); do
+    if docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$sleep_seconds"
+  done
+  return 1
+}
+
+start_docker_without_systemd() {
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if need_cmd service; then
+    log "systemd is unavailable; trying 'service docker start'..."
+    if $SUDO service docker start >/dev/null 2>&1; then
+      configure_docker_socket
+      if wait_for_docker 15 1; then
+        log "Docker service is running (service mode)."
+        return 0
+      fi
+    fi
+  fi
+
+  if ! need_cmd dockerd; then
+    return 1
+  fi
+
+  local dockerd_log="${DOCKERD_LOG_PATH:-/tmp/dockerd.log}"
+  local dockerd_flags="${DOCKERD_FLAGS:-}"
+  mkdir -p /var/run
+  log "systemd is unavailable; trying to start dockerd manually..."
+  if [[ -n "$SUDO" ]]; then
+    $SUDO nohup dockerd --host=unix:///var/run/docker.sock $dockerd_flags >"$dockerd_log" 2>&1 &
+  else
+    nohup dockerd --host=unix:///var/run/docker.sock $dockerd_flags >"$dockerd_log" 2>&1 &
+  fi
+
+  export DOCKER_HOST="unix:///var/run/docker.sock"
+  export DOCKER_SOCK_PATH="/var/run/docker.sock"
+  if wait_for_docker 25 1; then
+    log "dockerd is running (manual mode)."
+    return 0
+  fi
+
+  log "dockerd failed to start in this environment."
+  log "Last dockerd logs:"
+  tail -n 80 "$dockerd_log" || true
+  return 1
+}
+
+configure_docker_socket() {
+  if [[ -n "${DOCKER_HOST:-}" ]]; then
+    if [[ "${DOCKER_HOST}" == unix://* ]]; then
+      export DOCKER_SOCK_PATH="${DOCKER_HOST#unix://}"
+    fi
+    return
+  fi
+
+  local rootless_sock="/run/user/$(id -u)/docker.sock"
+  if [[ -S /var/run/docker.sock ]]; then
+    export DOCKER_HOST="unix:///var/run/docker.sock"
+    export DOCKER_SOCK_PATH="/var/run/docker.sock"
+    return
+  fi
+  if [[ -S "$rootless_sock" ]]; then
+    export DOCKER_HOST="unix://$rootless_sock"
+    export DOCKER_SOCK_PATH="$rootless_sock"
+    log "Using rootless Docker socket: $DOCKER_HOST"
+    return
+  fi
+
+  if need_cmd docker; then
+    local context_host=""
+    context_host="$(docker context inspect --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null || true)"
+    if [[ "$context_host" == unix://* ]]; then
+      local context_sock="${context_host#unix://}"
+      if [[ -S "$context_sock" ]]; then
+        export DOCKER_HOST="$context_host"
+        export DOCKER_SOCK_PATH="$context_sock"
+        log "Using Docker context socket: $DOCKER_HOST"
+        return
+      fi
+    fi
+  fi
 }
 
 SUDO=""
@@ -36,12 +145,18 @@ else
   log "Docker already installed."
 fi
 
-if ! docker compose version >/dev/null 2>&1; then
+resolve_compose_cmd
+if [[ ${#COMPOSE_CMD[@]} -eq 0 ]]; then
   log "Installing Docker Compose plugin..."
   $SUDO apt-get update
   $SUDO apt-get install -y docker-compose-plugin
+  resolve_compose_cmd
 else
-  log "Docker Compose plugin already available."
+  log "Docker Compose is available."
+fi
+if [[ ${#COMPOSE_CMD[@]} -eq 0 ]]; then
+  log "Docker Compose is not available (neither 'docker compose' nor 'docker-compose')."
+  exit 1
 fi
 
 if ! need_cmd nvidia-smi; then
@@ -60,15 +175,42 @@ if ! dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
   if need_cmd nvidia-ctk; then
     $SUDO nvidia-ctk runtime configure --runtime=docker
   fi
-  $SUDO systemctl restart docker || true
+  if has_systemd; then
+    $SUDO systemctl restart docker || true
+  else
+    log "Skipping Docker restart: systemd is not available in this environment."
+  fi
 else
   log "NVIDIA Container Toolkit already installed."
 fi
 
 mkdir -p models
 
+configure_docker_socket
+if ! docker info >/dev/null 2>&1; then
+  if has_systemd; then
+    log "Docker daemon not reachable; trying to start docker service..."
+    $SUDO systemctl start docker || true
+    configure_docker_socket
+  else
+    start_docker_without_systemd || true
+    configure_docker_socket
+  fi
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  log "Docker daemon is not reachable."
+  log "Current DOCKER_HOST: ${DOCKER_HOST:-<unset>}"
+  log "If Docker is rootless, set these and rerun:"
+  log "  export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock"
+  log "  export DOCKER_SOCK_PATH=/run/user/$(id -u)/docker.sock"
+  log "If this is a non-privileged RunPod/container, Docker-in-Docker may be blocked."
+  log "Use a pod/template with Docker daemon support, or mount a host docker socket."
+  exit 1
+fi
+
 log "Starting services..."
-docker compose up -d --build
+"${COMPOSE_CMD[@]}" up -d --build
 
 log "Controller UI: http://$(hostname -I | awk '{print $1}'):8080/"
 log "Admin UI:      http://$(hostname -I | awk '{print $1}'):8080/admin"

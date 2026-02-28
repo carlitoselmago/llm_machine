@@ -1,4 +1,4 @@
-﻿services:
+services:
   controller:
     build:
       context: .
@@ -16,7 +16,7 @@
       CONTAINER_NAME_PREFIX: "llmorch"
     volumes:
       - ./models:/models
-      - /var/run/docker.sock:/var/run/docker.sock
+      - "${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock"
     gpus: all
     deploy:
       resources:

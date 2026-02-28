@@ -1,4 +1,4 @@
-﻿# LLM Orchestrator (RunPod, Single Multi-GPU Machine)
+# LLM Orchestrator (RunPod, Single Multi-GPU Machine)
 
 FastAPI controller that serves the a chat frontend, manages Hugging Face model downloads, launches one `vllm/vllm-openai` container per model/GPU via Docker SDK, and exposes an OpenAI-compatible `/v1` API.
 
@@ -27,14 +27,21 @@ Browser (/ and /admin)
 
 - Ubuntu/Debian-based RunPod GPU instance
 - NVIDIA drivers installed on host (`nvidia-smi` works)
-- Docker daemon running
-- `docker.sock` available at `/var/run/docker.sock`
+- Docker daemon reachable from inside the pod (`docker info` works)
+- Docker socket available either at `/var/run/docker.sock` or rootless `/run/user/<uid>/docker.sock`
+- If the pod is an unprivileged container without Docker daemon access, Docker-in-Docker will not work for this project
 
 ## Quick Start
 
 One line install and execute for runpod:
 ```bash
 wget -O bootstrap-runpod.sh https://github.com/carlitoselmago/llm_machine/raw/refs/heads/main/bootstrap-runpod.sh && chmod +x bootstrap-runpod.sh && ./bootstrap-runpod.sh
+```
+
+Preflight check (recommended):
+```bash
+docker info
+ls -l /var/run/docker.sock /run/user/$(id -u)/docker.sock || true
 ```
 
 ```bash
@@ -262,7 +269,7 @@ Kept for compatibility with older callers:
 `docker-compose.yml` runs a single controller service and mounts:
 
 - `./models:/models`
-- `/var/run/docker.sock:/var/run/docker.sock`
+- `${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock`
 
 It also requests GPU access using `gpus: all` and includes a `deploy` reservation block for compatibility/documentation.
 
@@ -270,8 +277,11 @@ It also requests GPU access using `gpus: all` and includes a `deploy` reservatio
 
 ### Docker connection errors
 
-- Ensure `/var/run/docker.sock` is mounted
-- Verify controller container can talk to Docker daemon
+- Run `docker info` on the host first; if it fails, fix Docker daemon access before starting this project
+- If rootless Docker is used, export:
+  - `DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock`
+  - `DOCKER_SOCK_PATH=/run/user/$(id -u)/docker.sock`
+- In non-systemd pods, `install.sh` tries `service docker start` and then manual `dockerd` start; if both fail, the pod likely lacks required privileges for Docker daemon operation
 
 ### No GPUs detected
 
