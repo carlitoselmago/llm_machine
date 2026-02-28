@@ -49,6 +49,8 @@ chmod +x install.sh
 ./install.sh
 ```
 
+If Docker image build is blocked in your pod (for example `buildkit-mount ... operation not permitted`), `install.sh` automatically falls back to running the controller directly with `dev-local.sh` and keeps logs in `/tmp/llm-machine-controller.log`.
+
 Then open:
 
 - End-user chat UI: `http://<server-ip>:8080/`
@@ -286,6 +288,14 @@ It also requests GPU access using `gpus: all` and includes a `deploy` reservatio
 - You can override manual daemon flags with:
   - `DOCKERD_FLAGS="..." ./install.sh`
   - `DOCKERD_RETRY_FLAGS="..." ./install.sh`
+
+### Docker build mount errors on RunPod
+
+- Error example: `failed to mount ... operation not permitted` while building `llm_machine-controller`
+- Cause: pod lacks privileges needed for nested Docker image builds
+- `install.sh` fallback: retries legacy builder, then starts controller in local mode (`dev-local.sh`) if build is still blocked
+- Local fallback logs: `/tmp/llm-machine-controller.log`
+- Local fallback PID file: `/tmp/llm-machine-controller.pid`
 
 ### No GPUs detected
 

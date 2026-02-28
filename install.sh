@@ -136,6 +136,61 @@ configure_docker_socket() {
   fi
 }
 
+start_services_with_compose() {
+  local compose_log="${COMPOSE_LOG_PATH:-/tmp/llm-machine-compose.log}"
+  local compose_status=0
+
+  set +e
+  "${COMPOSE_CMD[@]}" up -d --build 2>&1 | tee "$compose_log"
+  compose_status=${PIPESTATUS[0]}
+  set -e
+  if [[ $compose_status -eq 0 ]]; then
+    return 0
+  fi
+
+  if grep -qiE 'buildkit-mount|failed to mount|operation not permitted' "$compose_log"; then
+    log "Compose build failed due to mount restrictions; retrying with legacy builder..."
+    set +e
+    DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 "${COMPOSE_CMD[@]}" up -d --build 2>&1 | tee "$compose_log"
+    compose_status=${PIPESTATUS[0]}
+    set -e
+    if [[ $compose_status -eq 0 ]]; then
+      return 0
+    fi
+    if grep -qiE 'failed to mount|operation not permitted' "$compose_log"; then
+      return 2
+    fi
+  fi
+
+  return 1
+}
+
+start_services_local_fallback() {
+  local local_log="${LOCAL_CONTROLLER_LOG_PATH:-/tmp/llm-machine-controller.log}"
+  local local_pid="${LOCAL_CONTROLLER_PID_PATH:-/tmp/llm-machine-controller.pid}"
+
+  chmod +x ./dev-local.sh
+  if [[ -f "$local_pid" ]] && kill -0 "$(cat "$local_pid")" >/dev/null 2>&1; then
+    log "Local controller already running (PID $(cat "$local_pid"))."
+    log "Logs: $local_log"
+    return 0
+  fi
+
+  log "Falling back to local controller mode (no Docker build)."
+  nohup ./dev-local.sh >"$local_log" 2>&1 &
+  echo "$!" >"$local_pid"
+  sleep 3
+  if kill -0 "$(cat "$local_pid")" >/dev/null 2>&1; then
+    log "Local controller started (PID $(cat "$local_pid"))."
+    log "Logs: $local_log"
+    return 0
+  fi
+
+  log "Local fallback failed."
+  tail -n 80 "$local_log" || true
+  return 1
+}
+
 SUDO=""
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   SUDO="sudo"
@@ -228,7 +283,19 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 log "Starting services..."
-"${COMPOSE_CMD[@]}" up -d --build
+compose_result=0
+set +e
+start_services_with_compose
+compose_result=$?
+set -e
+if [[ $compose_result -eq 2 ]]; then
+  log "Docker image build is blocked in this pod (mount operation not permitted)."
+  start_services_local_fallback
+elif [[ $compose_result -ne 0 ]]; then
+  log "Failed to start services with Docker Compose."
+  log "Check compose logs in ${COMPOSE_LOG_PATH:-/tmp/llm-machine-compose.log}"
+  exit 1
+fi
 
 log "Controller UI: http://$(hostname -I | awk '{print $1}'):8080/"
 log "Admin UI:      http://$(hostname -I | awk '{print $1}'):8080/admin"
