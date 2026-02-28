@@ -17,8 +17,11 @@
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; border-bottom: 1px solid #374151; padding: 8px; vertical-align: top; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
-    .running { background: #065f46; }
-    .stopped { background: #4b5563; }
+    .ready { background: #065f46; }
+    .downloaded { background: #4b5563; }
+    .not_downloaded { background: #374151; }
+    .downloading, .loading, .unloading { background: #92400e; }
+    .failed { background: #7f1d1d; }
     .error { color: #fca5a5; }
     .muted { color: #9ca3af; }
     pre { white-space: pre-wrap; background: #111827; border: 1px solid #374151; padding: 10px; border-radius: 8px; }
@@ -29,14 +32,21 @@
   <div class="wrap">
     <h1>LLM Orchestrator Admin</h1>
     <p class="muted">Basic-auth protected workshop admin. Manage Hugging Face downloads, GPU assignments, and vLLM containers.</p>
+    <p><a href="/stress.html" class="muted">Open live stress dashboard</a></p>
 
     <div class="grid">
       <section class="card">
         <h2>Download Model</h2>
         <div class="row">
           <input id="repoId" type="text" placeholder="meta-llama/Llama-3.2-1B-Instruct" style="flex:1; min-width:280px" />
+          <button id="loadQuantsBtn">Load GGUF Quants</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label for="ggufFile" class="muted">GGUF file:</label>
+          <select id="ggufFile" style="min-width:280px">
+            <option value="">All files (no GGUF filter)</option>
+          </select>
           <button id="downloadBtn">Download</button>
-          <button id="refreshBtn">Refresh</button>
         </div>
         <p id="downloadStatus" class="muted"></p>
       </section>
@@ -55,6 +65,7 @@
         <thead>
           <tr>
             <th>Model</th>
+            <th>Nickname</th>
             <th>Status</th>
             <th>GPU</th>
             <th>Container</th>
@@ -93,6 +104,111 @@
       return value.slice(0, 12);
     }
 
+    function escapeHtml(value) {
+      return String(value || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function isTransitionalStatus(status) {
+      return ['downloading', 'loading', 'unloading'].includes(status);
+    }
+
+    function statusClass(status) {
+      return (status || 'not_downloaded').replace(/[^a-z_]/g, '_');
+    }
+
+    function parseRepoInput(raw) {
+      const trimmed = (raw || '').trim();
+      if (!trimmed) return { repoId: '', revision: null };
+      if (!/^https?:\/\//i.test(trimmed)) {
+        return { repoId: trimmed, revision: null };
+      }
+      try {
+        const url = new URL(trimmed);
+        if (!/huggingface\.co$/i.test(url.hostname)) {
+          return { repoId: trimmed, revision: null };
+        }
+        const parts = url.pathname.split('/').filter(Boolean);
+        if (parts.length < 2) return { repoId: trimmed, revision: null };
+        const repoId = `${parts[0]}/${parts[1]}`;
+        const revision = (parts[2] === 'tree' && parts[3]) ? parts[3] : null;
+        return { repoId, revision };
+      } catch {
+        return { repoId: trimmed, revision: null };
+      }
+    }
+
+    function selectedGgufFile() {
+      const select = document.getElementById('ggufFile');
+      return select?.value?.trim() || '';
+    }
+
+    const nicknameDrafts = {};
+    let editingNicknameModelId = null;
+
+    function beginNicknameEdit(modelId) {
+      editingNicknameModelId = modelId;
+    }
+
+    function endNicknameEdit(modelId) {
+      const input = document.getElementById(`nickname-${modelId}`);
+      if (input) {
+        nicknameDrafts[modelId] = input.value;
+      }
+      if (editingNicknameModelId === modelId) {
+        editingNicknameModelId = null;
+      }
+    }
+
+    function onNicknameInput(modelId) {
+      const input = document.getElementById(`nickname-${modelId}`);
+      if (input) {
+        nicknameDrafts[modelId] = input.value;
+      }
+    }
+
+    function setGgufOptions(options) {
+      const select = document.getElementById('ggufFile');
+      if (!select) return;
+      select.innerHTML = '';
+      const defaultOption = document.createElement('option');
+      defaultOption.value = '';
+      defaultOption.textContent = 'All files (no GGUF filter)';
+      select.appendChild(defaultOption);
+      for (const file of options) {
+        const option = document.createElement('option');
+        option.value = file;
+        option.textContent = file;
+        select.appendChild(option);
+      }
+    }
+
+    async function loadRepoQuants() {
+      const status = document.getElementById('downloadStatus');
+      const raw = document.getElementById('repoId').value;
+      const parsed = parseRepoInput(raw);
+      if (!parsed.repoId) {
+        status.textContent = 'Enter a Hugging Face repo id or URL first.';
+        return;
+      }
+      document.getElementById('repoId').value = parsed.repoId;
+      status.textContent = `Loading files for ${parsed.repoId}...`;
+      try {
+        const query = new URLSearchParams({ repo_id: parsed.repoId });
+        if (parsed.revision) query.set('revision', parsed.revision);
+        const data = await api(`/api/admin/repos/files?${query.toString()}`);
+        setGgufOptions(data.gguf_files || []);
+        const count = (data.gguf_files || []).length;
+        status.textContent = count ? `Found ${count} GGUF quant file(s).` : 'No GGUF files found in this repo.';
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    }
+
     async function refreshAll() {
       try {
         const [health, gpus, models, containers] = await Promise.all([
@@ -107,9 +223,36 @@
           `<div>${g.gpu_id}: ${g.name} ${g.allocated ? '(allocated to ' + g.allocated_model_id + ')' : '(free)'}</div>`
         ).join('') || '<div class="muted">No GPUs detected</div>';
 
+        const modelIds = new Set(models.map((m) => m.model_id));
+        for (const draftModelId of Object.keys(nicknameDrafts)) {
+          if (!modelIds.has(draftModelId)) {
+            delete nicknameDrafts[draftModelId];
+          }
+        }
+        if (editingNicknameModelId && !modelIds.has(editingNicknameModelId)) {
+          editingNicknameModelId = null;
+        }
+
+        const editingActive = editingNicknameModelId && modelIds.has(editingNicknameModelId);
+        if (editingActive) {
+          const activeInput = document.getElementById(`nickname-${editingNicknameModelId}`);
+          if (activeInput) {
+            nicknameDrafts[editingNicknameModelId] = activeInput.value;
+          }
+          document.getElementById('containersDump').textContent = JSON.stringify(containers.containers, null, 2);
+          return;
+        }
+
         const tbody = document.getElementById('modelsBody');
         tbody.innerHTML = models.map(m => {
-          const statusBadge = m.running ? '<span class="badge running">running</span>' : '<span class="badge stopped">' + m.download_status + '</span>';
+          const modelStatus = m.download_status || (m.running ? 'ready' : 'not_downloaded');
+          const statusBadge = `<span class="badge ${statusClass(modelStatus)}">${modelStatus}</span>`;
+          const transitional = isTransitionalStatus(modelStatus);
+          const canStart = m.downloaded && !m.running && !transitional;
+          const canStop = m.running && modelStatus !== 'unloading';
+          const canDelete = !m.running && !transitional;
+          const nicknameInputId = `nickname-${m.model_id}`;
+          const nicknameValue = escapeHtml(nicknameDrafts[m.model_id] ?? m.nickname ?? '');
           const err = m.error ? `<div class="error">${m.error}</div>` : '';
           return `
             <tr>
@@ -118,15 +261,21 @@
                 <div class="muted">${m.repo_id}</div>
                 ${err}
               </td>
+              <td>
+                <div class="row">
+                  <input id="${nicknameInputId}" type="text" value="${nicknameValue}" placeholder="nickname" onfocus="beginNicknameEdit('${m.model_id}')" onblur="endNicknameEdit('${m.model_id}')" oninput="onNicknameInput('${m.model_id}')" />
+                  <button onclick="saveNickname('${m.model_id}')" ${transitional ? 'disabled' : ''}>Save</button>
+                </div>
+              </td>
               <td>${statusBadge}</td>
               <td>${m.gpu_id || '-'}</td>
               <td title="${m.container_id || ''}">${shortId(m.container_id)}</td>
               <td>${m.port || '-'}</td>
               <td>
                 <div class="row">
-                  <button onclick="startModel('${m.model_id}')" ${m.running || !m.downloaded ? 'disabled' : ''}>Start</button>
-                  <button onclick="stopModel('${m.model_id}')" ${m.running ? '' : 'disabled'}>Stop</button>
-                  <button onclick="deleteModel('${m.model_id}')" ${m.running ? 'disabled' : ''}>Delete</button>
+                  <button onclick="startModel('${m.model_id}')" ${canStart ? '' : 'disabled'}>Start</button>
+                  <button onclick="stopModel('${m.model_id}')" ${canStop ? '' : 'disabled'}>Stop</button>
+                  <button onclick="deleteModel('${m.model_id}')" ${canDelete ? '' : 'disabled'}>Delete</button>
                 </div>
               </td>
             </tr>`;
@@ -136,6 +285,24 @@
       } catch (err) {
         console.error(err);
         document.getElementById('downloadStatus').textContent = err.message;
+      }
+    }
+
+    async function saveNickname(modelId) {
+      const input = document.getElementById(`nickname-${modelId}`);
+      const nickname = input ? input.value : (nicknameDrafts[modelId] || '');
+      try {
+        await api(`/api/admin/models/${encodeURIComponent(modelId)}/nickname`, {
+          method: 'PUT',
+          body: JSON.stringify({ nickname: nickname || null }),
+        });
+        delete nicknameDrafts[modelId];
+        if (editingNicknameModelId === modelId) {
+          editingNicknameModelId = null;
+        }
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
       }
     }
 
@@ -168,23 +335,45 @@
     }
 
     document.getElementById('downloadBtn').addEventListener('click', async () => {
-      const repoId = document.getElementById('repoId').value.trim();
+      const downloadBtn = document.getElementById('downloadBtn');
+      const loadQuantsBtn = document.getElementById('loadQuantsBtn');
+      const parsed = parseRepoInput(document.getElementById('repoId').value);
+      const repoId = parsed.repoId;
       if (!repoId) return;
       const status = document.getElementById('downloadStatus');
       status.textContent = `Downloading ${repoId}...`;
+      downloadBtn.disabled = true;
+      loadQuantsBtn.disabled = true;
       try {
-        await api('/api/admin/models/download', { method: 'POST', body: JSON.stringify({ repo_id: repoId }) });
+        document.getElementById('repoId').value = repoId;
+        const payload = { repo_id: repoId };
+        if (parsed.revision) payload.revision = parsed.revision;
+        const selected = selectedGgufFile();
+        if (selected) {
+          payload.allow_patterns = [
+            selected,
+            '*.json',
+            '*.txt',
+            '*.model',
+            '*.tiktoken',
+          ];
+        }
+        await api('/api/admin/models/download', { method: 'POST', body: JSON.stringify(payload) });
         status.textContent = `Downloaded ${repoId}`;
         document.getElementById('repoId').value = '';
+        setGgufOptions([]);
         await refreshAll();
       } catch (err) {
         status.textContent = err.message;
+      } finally {
+        downloadBtn.disabled = false;
+        loadQuantsBtn.disabled = false;
       }
     });
 
-    document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+    document.getElementById('loadQuantsBtn').addEventListener('click', loadRepoQuants);
     refreshAll();
-    setInterval(refreshAll, 8000);
+    setInterval(refreshAll, 2000);
   </script>
 </body>
 </html>

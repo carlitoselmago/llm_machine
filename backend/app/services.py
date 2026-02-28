@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 
 import httpx
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, snapshot_download
 
 from .config import Config
 from .docker_manager import DockerManager, ManagedContainerRecord
@@ -16,6 +16,13 @@ from .model_registry import ModelRegistry, sanitize_model_id
 from .schemas import DownloadModelRequest, GpuInfo, ModelInfo, StartModelRequest
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _ModelLaunchSpec:
+    model_ref: str
+    tokenizer_ref: str | None = None
+    hf_config_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -85,6 +92,11 @@ class AppServices:
         self.registry.sync_downloaded_from_disk()
         return self.registry.list_models()
 
+    def set_model_nickname(self, model_id: str, nickname: str | None) -> ModelInfo:
+        with self._ops_lock:
+            self.registry.sync_downloaded_from_disk()
+            return self.registry.set_nickname(model_id, nickname)
+
     def list_managed_containers(self) -> list[dict[str, object]]:
         if not self.docker_manager.is_connected():
             return []
@@ -124,27 +136,63 @@ class AppServices:
             self.registry.mark_download_failed(req.repo_id, str(exc))
             raise
 
+    def list_repo_files(self, repo_id: str, revision: str | None = None) -> list[str]:
+        api = HfApi(token=self.config.hf_token)
+        try:
+            files = api.list_repo_files(repo_id=repo_id, revision=revision, repo_type="model")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to list files for repo {repo_id}: {exc}") from exc
+        return sorted(files)
+
     @staticmethod
-    def _validate_model_directory_for_vllm(local_path: str) -> None:
+    def _resolve_model_launch_spec(*, model_id: str, repo_id: str, local_path: str) -> _ModelLaunchSpec:
         config_json = os.path.join(local_path, "config.json")
         params_json = os.path.join(local_path, "params.json")
         if os.path.isfile(config_json) or os.path.isfile(params_json):
-            return
+            return _ModelLaunchSpec(model_ref=f"/models/{model_id}")
 
         try:
             entries = os.listdir(local_path)
         except OSError as exc:
             raise RuntimeError(f"Cannot inspect model directory {local_path}: {exc}") from exc
 
-        has_gguf = any(name.lower().endswith(".gguf") for name in entries)
-        if has_gguf:
-            raise RuntimeError(
-                "Model format appears to be GGUF, which is not supported by this vLLM workflow. "
-                "Use a Hugging Face Transformers model directory with config.json (or params.json)."
+        gguf_files = sorted(
+            name
+            for name in entries
+            if name.lower().endswith(".gguf") and os.path.isfile(os.path.join(local_path, name))
+        )
+        if len(gguf_files) >= 1:
+            if len(gguf_files) == 1:
+                gguf_name = gguf_files[0]
+            else:
+                sized_gguf_files: list[tuple[int, str]] = []
+                for name in gguf_files:
+                    full_path = os.path.join(local_path, name)
+                    try:
+                        sized_gguf_files.append((os.path.getsize(full_path), name))
+                    except OSError as exc:
+                        raise RuntimeError(f"Failed to read GGUF file size for {name}: {exc}") from exc
+                sized_gguf_files.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                gguf_name = sized_gguf_files[0][1]
+                logger.info(
+                    "Multiple GGUF files found for %s; selected largest file: %s",
+                    model_id,
+                    gguf_name,
+                )
+
+            model_dir_ref = f"/models/{model_id}"
+            model_ref = f"{model_dir_ref}/{gguf_name}"
+            tokenizer_markers = ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
+            tokenizer_ref = model_dir_ref if any(os.path.isfile(os.path.join(local_path, marker)) for marker in tokenizer_markers) else None
+            hf_config_path = repo_id if repo_id and "/" in repo_id else None
+            return _ModelLaunchSpec(
+                model_ref=model_ref,
+                tokenizer_ref=tokenizer_ref,
+                hf_config_path=hf_config_path,
             )
         raise RuntimeError(
             "Model directory is missing config.json/params.json required by vLLM. "
-            "Use a compatible Hugging Face Transformers model."
+            "or GGUF files. Use a compatible Hugging Face Transformers model."
         )
 
     def start_model(self, model_id: str, options: StartModelRequest) -> ModelInfo:
@@ -153,42 +201,57 @@ class AppServices:
                 raise RuntimeError("Docker daemon is unavailable")
             self.registry.sync_downloaded_from_disk()
             state = self.registry.get_state(model_id)
-            if state is None or not os.path.isdir(state.local_path):
+            if state is None or not state.downloaded or not os.path.isdir(state.local_path):
                 raise FileNotFoundError(f"Model {model_id} is not downloaded")
+            if state.download_status == "downloading":
+                raise RuntimeError(f"Model {model_id} is still downloading")
+            if state.download_status == "loading":
+                raise RuntimeError(f"Model {model_id} is already loading")
+            if state.download_status == "unloading":
+                raise RuntimeError(f"Model {model_id} is unloading")
             if state.running:
                 raise RuntimeError(f"Model {model_id} is already running")
-            try:
-                self._validate_model_directory_for_vllm(state.local_path)
-            except RuntimeError as exc:
-                self.registry.mark_start_failed(model_id, str(exc))
-                raise
 
-            gpu_id = self.gpu_manager.allocate(model_id)
-            used_ports = {m.port for m in self.registry.running_models() if m.port is not None}
-            host_port = self.docker_manager.find_free_host_port({int(p) for p in used_ports})
-            gpu_memory_utilization = options.gpu_memory_utilization
-            if gpu_memory_utilization is None:
-                gpu_memory_utilization = self.config.default_gpu_memory_utilization
-            if gpu_memory_utilization is None:
-                gpu_memory_utilization = 0.75
-            max_num_seqs = options.max_num_seqs
-            if max_num_seqs is None:
-                max_num_seqs = self.config.default_max_num_seqs
-            if max_num_seqs is None:
-                max_num_seqs = 64
-            effective_served_model_name = options.served_model_name or model_id
+            self.registry.mark_loading(model_id)
+            gpu_id: str | None = None
             started: ManagedContainerRecord | None = None
             try:
+                launch_spec = self._resolve_model_launch_spec(
+                    model_id=model_id,
+                    repo_id=state.repo_id,
+                    local_path=state.local_path,
+                )
+
+                gpu_id = self.gpu_manager.allocate(model_id)
+                used_ports = {m.port for m in self.registry.running_models() if m.port is not None}
+                host_port = self.docker_manager.find_free_host_port({int(p) for p in used_ports})
+                gpu_memory_utilization = options.gpu_memory_utilization
+                if gpu_memory_utilization is None:
+                    gpu_memory_utilization = self.config.default_gpu_memory_utilization
+                if gpu_memory_utilization is None:
+                    gpu_memory_utilization = 0.75
+                max_num_seqs = options.max_num_seqs
+                if max_num_seqs is None:
+                    max_num_seqs = self.config.default_max_num_seqs
+                if max_num_seqs is None:
+                    max_num_seqs = 64
+                max_model_len = options.max_model_len
+                if max_model_len is None:
+                    max_model_len = self.config.default_max_model_len
+                effective_served_model_name = options.served_model_name or state.nickname or model_id
                 self.docker_manager.pull_image_if_needed()
                 started = self.docker_manager.start_vllm_container(
                     model_id=model_id,
                     repo_id=state.repo_id,
                     gpu_id=gpu_id,
                     host_port=host_port,
+                    model_ref=launch_spec.model_ref,
+                    tokenizer_ref=launch_spec.tokenizer_ref,
+                    hf_config_path=launch_spec.hf_config_path,
                     served_model_name=effective_served_model_name,
                     trust_remote_code=options.trust_remote_code,
                     dtype=options.dtype,
-                    max_model_len=options.max_model_len,
+                    max_model_len=max_model_len,
                     gpu_memory_utilization=gpu_memory_utilization,
                     max_num_seqs=max_num_seqs,
                 )
@@ -209,7 +272,8 @@ class AppServices:
                         self.docker_manager.stop_and_remove_container(started.container_id)
                     except Exception:  # noqa: BLE001
                         logger.exception("Cleanup failed after start error for %s", model_id)
-                self.gpu_manager.release(gpu_id)
+                if gpu_id is not None:
+                    self.gpu_manager.release(gpu_id)
                 self.registry.mark_start_failed(model_id, str(exc))
                 raise
 
@@ -220,18 +284,27 @@ class AppServices:
             state = self.registry.get_state(model_id)
             if state is None:
                 raise FileNotFoundError(f"Model {model_id} not found")
+            if state.download_status == "unloading":
+                raise RuntimeError(f"Model {model_id} is already unloading")
             if not state.running or not state.container_id:
                 raise RuntimeError(f"Model {model_id} is not running")
-            self.docker_manager.stop_and_remove_container(state.container_id)
-            if state.gpu_id:
-                self.gpu_manager.release(state.gpu_id)
-            return self.registry.mark_stopped(model_id)
+            self.registry.mark_unloading(model_id)
+            try:
+                self.docker_manager.stop_and_remove_container(state.container_id)
+                if state.gpu_id:
+                    self.gpu_manager.release(state.gpu_id)
+                return self.registry.mark_stopped(model_id)
+            except Exception as exc:  # noqa: BLE001
+                self.registry.mark_stop_failed(model_id, str(exc))
+                raise
 
     def delete_model(self, model_id: str) -> None:
         with self._ops_lock:
             state = self.registry.get_state(model_id)
             if state is None:
                 raise FileNotFoundError(f"Model {model_id} not found")
+            if state.download_status in {"downloading", "loading", "unloading"}:
+                raise RuntimeError(f"Model {model_id} is busy ({state.download_status}) and cannot be deleted")
             if state.running:
                 raise RuntimeError(f"Model {model_id} is running and cannot be deleted")
             if os.path.isdir(state.local_path):

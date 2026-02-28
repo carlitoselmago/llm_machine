@@ -48,6 +48,7 @@ class Config:
     vllm_health_poll_seconds: float = 2.0
     default_gpu_memory_utilization: float | None = None
     default_max_num_seqs: int | None = None
+    default_max_model_len: int = 20000
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -68,4 +69,5 @@ class Config:
             vllm_health_poll_seconds=float(os.getenv("VLLM_HEALTH_POLL_SECONDS", "2")),
             default_gpu_memory_utilization=_optional_float_env("DEFAULT_GPU_MEMORY_UTILIZATION"),
             default_max_num_seqs=_optional_int_env("DEFAULT_MAX_NUM_SEQS"),
+            default_max_model_len=int(os.getenv("DEFAULT_MAX_MODEL_LEN", "20000")),
         )

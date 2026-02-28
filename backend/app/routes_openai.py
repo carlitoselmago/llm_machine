@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -24,6 +25,23 @@ def openai_error(status_code: int, message: str, *, error_type: str = "invalid_r
 def _filtered_headers(headers: dict[str, str]) -> dict[str, str]:
     hop_by_hop = {"host", "connection", "content-length"}
     return {k: v for k, v in headers.items() if k.lower() not in hop_by_hop}
+
+
+def _directory_size_bytes(path: str) -> int | None:
+    if not os.path.isdir(path):
+        return None
+    total = 0
+    try:
+        for root, _, files in os.walk(path):
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                try:
+                    total += os.path.getsize(file_path)
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    return total
 
 
 async def forward_openai_request(
@@ -90,10 +108,19 @@ async def forward_openai_request(
 
 @router.get("/v1/models", response_model=OpenAIModelListResponse)
 async def list_models(services: AppServices = Depends(get_services)) -> OpenAIModelListResponse:
-    cards = [
-        OpenAIModelCard(id=m.served_model_name or m.model_id)
-        for m in services.registry.running_models()
-    ]
+    cards: list[OpenAIModelCard] = []
+    for m in services.registry.running_models():
+        model_name = m.nickname or m.served_model_name or m.model_id
+        size_bytes = _directory_size_bytes(m.local_path)
+        size_gb = round(size_bytes / (1024**3), 2) if size_bytes is not None else None
+        display_name = f"{model_name} ({size_gb:.2f} GB)" if size_gb is not None else model_name
+        cards.append(
+            OpenAIModelCard(
+                id=model_name,
+                display_name=display_name,
+                size_gb=size_gb,
+            )
+        )
     return OpenAIModelListResponse(data=cards)
 
 

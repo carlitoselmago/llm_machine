@@ -32,10 +32,15 @@ class StartModelRequest(BaseModel):
     max_num_seqs: int | None = None
 
 
+class ModelNicknameRequest(BaseModel):
+    nickname: str | None = None
+
+
 class ModelInfo(BaseModel):
     repo_id: str
     model_id: str
     local_path: str
+    nickname: str | None = None
     downloaded: bool = False
     download_status: str = "not_downloaded"
     running: bool = False
@@ -64,11 +69,19 @@ class AdminContainersResponse(BaseModel):
     containers: list[dict[str, Any]]
 
 
+class AdminRepoFilesResponse(BaseModel):
+    repo_id: str
+    files: list[str]
+    gguf_files: list[str]
+
+
 class OpenAIModelCard(BaseModel):
     id: str
     object: str = "model"
     created: int = 0
     owned_by: str = "llm-orchestrator"
+    display_name: str | None = None
+    size_gb: float | None = None
 
 
 class OpenAIModelListResponse(BaseModel):

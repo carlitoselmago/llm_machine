@@ -13,8 +13,10 @@ from .model_registry import sanitize_model_id
 from .schemas import (
     AdminContainersResponse,
     AdminHealthResponse,
+    AdminRepoFilesResponse,
     DownloadModelRequest,
     GpuInfo,
+    ModelNicknameRequest,
     ModelInfo,
     StartModelRequest,
 )
@@ -37,8 +39,6 @@ def _http_error_from_exc(exc: Exception) -> HTTPException:
             return HTTPException(status_code=503, detail=msg)
         if "docker gpu runtime is unavailable" in detail_lower:
             return HTTPException(status_code=503, detail=msg)
-        if "not supported by this vllm workflow" in detail_lower:
-            return HTTPException(status_code=400, detail=msg)
         if "missing config.json/params.json required by vllm" in detail_lower:
             return HTTPException(status_code=400, detail=msg)
         if "free memory on device" in detail_lower or "gpu memory utilization" in detail_lower:
@@ -48,6 +48,10 @@ def _http_error_from_exc(exc: Exception) -> HTTPException:
         if "max_num_seqs" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
         if "container is restarting repeatedly" in detail_lower:
+            return HTTPException(status_code=409, detail=msg)
+        if "still downloading" in detail_lower or "loading" in detail_lower or "unloading" in detail_lower:
+            return HTTPException(status_code=409, detail=msg)
+        if "busy (" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
         if "already" in detail_lower or "not running" in detail_lower or "cannot be deleted" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
@@ -125,6 +129,28 @@ async def download_model(
         raise _http_error_from_exc(exc) from exc
 
 
+@router.get(
+    "/api/admin/repos/files",
+    response_model=AdminRepoFilesResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def repo_files(
+    repo_id: str,
+    revision: str | None = None,
+    services: AppServices = Depends(get_services),
+) -> AdminRepoFilesResponse:
+    repo_id = repo_id.strip()
+    if not repo_id:
+        raise HTTPException(status_code=400, detail="repo_id is required")
+    try:
+        files = await run_in_threadpool(services.list_repo_files, repo_id, revision)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Repo files request failed for %s", repo_id)
+        raise _http_error_from_exc(exc) from exc
+    gguf_files = [name for name in files if name.lower().endswith(".gguf")]
+    return AdminRepoFilesResponse(repo_id=repo_id, files=files, gguf_files=gguf_files)
+
+
 @router.post(
     "/api/admin/models/{model_id}/start",
     response_model=ModelInfo,
@@ -155,6 +181,27 @@ async def stop_model(model_id: str, services: AppServices = Depends(get_services
         return await run_in_threadpool(services.stop_model, sanitize_model_id(model_id))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Stop request failed for %s", model_id)
+        raise _http_error_from_exc(exc) from exc
+
+
+@router.put(
+    "/api/admin/models/{model_id}/nickname",
+    response_model=ModelInfo,
+    dependencies=[Depends(require_admin)],
+)
+async def update_model_nickname(
+    model_id: str,
+    payload: ModelNicknameRequest,
+    services: AppServices = Depends(get_services),
+) -> ModelInfo:
+    try:
+        return await run_in_threadpool(
+            services.set_model_nickname,
+            sanitize_model_id(model_id),
+            payload.nickname,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Nickname update failed for %s", model_id)
         raise _http_error_from_exc(exc) from exc
 
 

@@ -99,6 +99,39 @@ curl -u admin:workshop http://127.0.0.1:8080/api/admin/health
 curl http://127.0.0.1:8080/v1/models
 ```
 
+### Stress test concurrent clients on one model/GPU
+
+Use the built-in load script to estimate how many simultaneous clients a single running model can handle on one GPU.
+
+1) Start backend and start one model in `/admin`  
+2) Run with a fixed number of simulated clients (streaming enabled by default):
+
+```bash
+python3 tools/stress_clients.py \
+  --base-url http://127.0.0.1:8080 \
+  --model Qwen_Qwen2.5-1.5B-Instruct \
+  --clients 6 \
+  --duration 120 \
+  --max-tokens 128 \
+  --report-interval 2
+```
+
+`--clients` is the exact concurrent client count.  
+Live logs show aggregate delay/throughput while the run is active, and final summary includes per-client average latency + TTFT (time-to-first-token).
+
+Sweep example (to find capacity):
+
+```bash
+python3 tools/stress_clients.py \
+  --base-url http://127.0.0.1:8080 \
+  --model Qwen_Qwen2.5-1.5B-Instruct \
+  --sweep 1,2,4,8,12 \
+  --duration 45 \
+  --max-tokens 128
+```
+
+The script reports per-level success/failure rate, throughput (req/s), and latency (p50/p95/p99), then prints a recommended stable client count (<=5% errors).
+
 ### Option B: Frontend-only testing (no Docker/GPU)
 
 If you only need to iterate on the browser UI, you can serve `front/public/` and point the **API URL** field to any OpenAI-compatible backend (LM Studio, etc.).
@@ -140,6 +173,7 @@ Behavior:
 Features:
 
 - Download Hugging Face models to `./models/<sanitized_model_id>`
+- Inspect repo files and choose a GGUF quant file before download
 - List downloaded/running models
 - Start model (auto-assign free GPU)
 - Stop model
@@ -151,6 +185,7 @@ Admin API routes (Basic auth):
 - `GET /api/admin/health`
 - `GET /api/admin/gpus`
 - `GET /api/admin/models`
+- `GET /api/admin/repos/files?repo_id=<repo>&revision=<optional>`
 - `POST /api/admin/models/download`
 - `POST /api/admin/models/{model_id}/start`
 - `POST /api/admin/models/{model_id}/stop`
@@ -259,13 +294,21 @@ docker logs <vllm-container-id>
 ### Model downloaded but not available in `/v1/models`
 
 - `/v1/models` shows only running models
-- GGUF folders are not supported by this vLLM workflow
-- Use a Hugging Face Transformers model with `config.json` (or Mistral `params.json`)
+- GGUF folders are supported automatically
+- If a folder contains multiple `.gguf` files, the orchestrator automatically selects the largest file
+- Transformers/Mistral folders with `config.json` or `params.json` are also supported
 - If needed, inspect crash logs:
 
 ```bash
 docker logs <vllm-container-id>
 ```
+
+### Downloading a specific GGUF quant
+
+1. In `/admin`, paste a Hugging Face repo id or URL
+2. Click **Load GGUF Quants**
+3. Choose the `.gguf` file in the dropdown
+4. Click **Download**
 
 ### Hugging Face download issues
 

@@ -19,6 +19,7 @@ class _ModelState:
     repo_id: str
     model_id: str
     local_path: str
+    nickname: str | None = None
     downloaded: bool = False
     download_status: str = "not_downloaded"
     running: bool = False
@@ -34,6 +35,7 @@ class _ModelState:
             repo_id=self.repo_id,
             model_id=self.model_id,
             local_path=self.local_path,
+            nickname=self.nickname,
             downloaded=self.downloaded,
             download_status=self.download_status,
             running=self.running,
@@ -69,9 +71,15 @@ class ModelRegistry:
                     state = _ModelState(repo_id=name, model_id=model_id, local_path=full_path)
                     self._models[model_id] = state
                 state.local_path = full_path
-                state.downloaded = True
-                if state.download_status in {"not_downloaded", "downloading", "failed"}:
-                    state.download_status = "downloaded"
+                if state.download_status == "downloading":
+                    state.downloaded = False
+                else:
+                    state.downloaded = True
+                    if state.running:
+                        if state.download_status != "unloading":
+                            state.download_status = "ready"
+                    elif state.download_status in {"not_downloaded", "failed", "ready"}:
+                        state.download_status = "downloaded"
                 seen.add(model_id)
 
             for model_id, state in list(self._models.items()):
@@ -79,7 +87,7 @@ class ModelRegistry:
                     continue
                 if not state.running:
                     state.downloaded = False
-                    if state.download_status != "downloading":
+                    if state.download_status not in {"downloading", "loading", "unloading"}:
                         state.download_status = "not_downloaded"
             return self.list_models()
 
@@ -103,6 +111,10 @@ class ModelRegistry:
             state = self._get_or_create(repo_id)
             if state.download_status == "downloading":
                 raise RuntimeError(f"Model {state.model_id} is already downloading")
+            if state.download_status in {"loading", "unloading"}:
+                raise RuntimeError(f"Model {state.model_id} is busy ({state.download_status})")
+            if state.running:
+                raise RuntimeError(f"Model {state.model_id} is running")
             state.download_status = "downloading"
             state.error = None
             return state.to_model_info()
@@ -118,8 +130,45 @@ class ModelRegistry:
     def mark_download_failed(self, repo_id: str, error: str) -> ModelInfo:
         with self._lock:
             state = self._get_or_create(repo_id)
-            state.download_status = "failed"
+            state.downloaded = state.downloaded and os.path.isdir(state.local_path)
+            state.download_status = "downloaded" if state.downloaded else "failed"
             state.error = error
+            return state.to_model_info()
+
+    def set_nickname(self, model_id: str, nickname: str | None) -> ModelInfo:
+        with self._lock:
+            state = self._models.get(model_id)
+            if state is None:
+                raise FileNotFoundError(f"Model {model_id} not found")
+            desired = (nickname or "").strip() or None
+            if desired and len(desired) > 120:
+                raise RuntimeError("Nickname must be 120 characters or fewer")
+            if desired:
+                for candidate in self._models.values():
+                    if candidate.model_id == model_id:
+                        continue
+                    if desired in {
+                        candidate.model_id,
+                        candidate.nickname,
+                        candidate.served_model_name,
+                    }:
+                        raise RuntimeError(f"Nickname '{desired}' is already used by another model")
+            state.nickname = desired
+            return state.to_model_info()
+
+    def mark_loading(self, model_id: str) -> ModelInfo:
+        with self._lock:
+            state = self._models[model_id]
+            if not state.downloaded:
+                raise RuntimeError(f"Model {model_id} is not downloaded")
+            if state.running:
+                raise RuntimeError(f"Model {model_id} is already running")
+            if state.download_status == "loading":
+                raise RuntimeError(f"Model {model_id} is already loading")
+            if state.download_status == "unloading":
+                raise RuntimeError(f"Model {model_id} is unloading")
+            state.download_status = "loading"
+            state.error = None
             return state.to_model_info()
 
     def mark_started(
@@ -139,9 +188,8 @@ class ModelRegistry:
                 state = self._get_or_create(repo_id or model_id)
             if repo_id:
                 state.repo_id = repo_id
-            state.downloaded = os.path.isdir(state.local_path)
-            if state.downloaded:
-                state.download_status = "downloaded"
+            state.downloaded = True
+            state.download_status = "ready"
             state.running = True
             state.container_id = container_id
             state.gpu_id = gpu_id
@@ -160,6 +208,18 @@ class ModelRegistry:
             state.port = None
             state.endpoint = None
             state.served_model_name = None
+            state.downloaded = os.path.isdir(state.local_path)
+            state.download_status = "downloaded" if state.downloaded else "not_downloaded"
+            state.error = None
+            return state.to_model_info()
+
+    def mark_unloading(self, model_id: str) -> ModelInfo:
+        with self._lock:
+            state = self._models[model_id]
+            if not state.running:
+                raise RuntimeError(f"Model {model_id} is not running")
+            state.download_status = "unloading"
+            state.error = None
             return state.to_model_info()
 
     def mark_start_failed(self, model_id: str, error: str) -> ModelInfo | None:
@@ -173,6 +233,21 @@ class ModelRegistry:
             state.port = None
             state.endpoint = None
             state.served_model_name = None
+            state.downloaded = os.path.isdir(state.local_path)
+            state.download_status = "downloaded" if state.downloaded else "not_downloaded"
+            state.error = error
+            return state.to_model_info()
+
+    def mark_stop_failed(self, model_id: str, error: str) -> ModelInfo | None:
+        with self._lock:
+            state = self._models.get(model_id)
+            if state is None:
+                return None
+            if state.running:
+                state.download_status = "ready"
+            else:
+                state.downloaded = os.path.isdir(state.local_path)
+                state.download_status = "downloaded" if state.downloaded else "not_downloaded"
             state.error = error
             return state.to_model_info()
 
@@ -208,5 +283,7 @@ class ModelRegistry:
                 return state
             for candidate in self._models.values():
                 if candidate.served_model_name == requested_model:
+                    return candidate
+                if candidate.nickname == requested_model:
                     return candidate
             return None

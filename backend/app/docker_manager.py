@@ -87,6 +87,9 @@ class DockerManager:
         repo_id: str,
         gpu_id: str,
         host_port: int,
+        model_ref: str | None = None,
+        tokenizer_ref: str | None = None,
+        hf_config_path: str | None = None,
         served_model_name: str | None = None,
         trust_remote_code: bool = False,
         dtype: str | None = None,
@@ -106,7 +109,12 @@ class DockerManager:
         if served_model_name:
             labels[self.config.label_served_model_name] = served_model_name
 
-        cmd = [f"/models/{model_id}", "--port", str(self.config.vllm_internal_port)]
+        target_model_ref = model_ref or f"/models/{model_id}"
+        cmd = [target_model_ref, "--port", str(self.config.vllm_internal_port)]
+        if tokenizer_ref:
+            cmd += ["--tokenizer", tokenizer_ref]
+        if hf_config_path:
+            cmd += ["--hf-config-path", hf_config_path]
         if served_model_name:
             cmd += ["--served-model-name", served_model_name]
         if trust_remote_code:

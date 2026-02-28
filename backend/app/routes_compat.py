@@ -14,7 +14,7 @@ router = APIRouter(tags=["compat"])
 
 @router.get("/api/models")
 async def compat_models(services: AppServices = Depends(get_services)) -> list[str]:
-    return [m.served_model_name or m.model_id for m in services.registry.running_models()]
+    return [m.nickname or m.served_model_name or m.model_id for m in services.registry.running_models()]
 
 
 @router.post("/api/complete")
