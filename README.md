@@ -56,6 +56,55 @@ export HF_TOKEN=your_token_if_needed
 docker compose up -d --build
 ```
 
+## Local Dev (Linux, without RunPod)
+
+Use this when you want fast iteration (auto-reload) on a Linux machine, without a RunPod instance.
+
+### Option A: Run the controller in dev mode (recommended)
+
+Prereqs:
+
+- Python 3.11
+- Docker Engine running (the controller uses the Docker SDK via your local Docker daemon)
+- NVIDIA drivers available on the host (`nvidia-smi` works). Note: the controller currently calls `nvidia-smi` during startup, so it won’t boot cleanly on machines without NVIDIA drivers.
+- NVIDIA Container Toolkit (required if you want to actually start vLLM model containers)
+
+Start the FastAPI dev server (auto-reload):
+
+```bash
+chmod +x dev-local.sh
+./dev-local.sh
+```
+
+Optional env vars:
+
+```bash
+HF_TOKEN=your_token_if_needed ./dev-local.sh
+ADMIN_USERNAME=admin ADMIN_PASSWORD=workshop ./dev-local.sh
+```
+
+Common gotcha (Docker permissions):
+
+- If you see Docker “permission denied” errors, make sure your user can run `docker ps` without `sudo` (e.g. add your user to the `docker` group and re-login).
+
+Quick local smoke checks:
+
+```bash
+curl -u admin:workshop http://127.0.0.1:8080/api/admin/health
+curl http://127.0.0.1:8080/v1/models
+```
+
+### Option B: Frontend-only testing (no Docker/GPU)
+
+If you only need to iterate on the browser UI, you can serve `front/public/` and point the **API URL** field to any OpenAI-compatible backend (LM Studio, etc.).
+
+```bash
+cd front/public
+python3 -m http.server 3000
+```
+
+Open `http://127.0.0.1:3000/`, set **API URL** (example: `http://127.0.0.1:1234`), then reload the model list.
+
 ## Project Layout
 
 ```text
