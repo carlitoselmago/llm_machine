@@ -157,9 +157,10 @@ start_services_with_compose() {
     if [[ $compose_status -eq 0 ]]; then
       return 0
     fi
-    if grep -qiE 'failed to mount|operation not permitted' "$compose_log"; then
+    if grep -qiE 'failed to mount|operation not permitted|unshare: operation not permitted' "$compose_log"; then
       return 2
     fi
+    return 2
   fi
 
   return 1
