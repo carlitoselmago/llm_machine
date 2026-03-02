@@ -31,7 +31,7 @@
 <body>
   <div class="wrap">
     <h1>LLM Orchestrator Admin</h1>
-    <p class="muted">Basic-auth protected workshop admin. Manage Hugging Face downloads, GPU assignments, and vLLM containers.</p>
+    <p class="muted">Basic-auth protected workshop admin. Manage Hugging Face downloads, GPU assignments, and vLLM runtime processes.</p>
     <p><a href="/stress.html" class="muted">Open live stress dashboard</a></p>
 
     <div class="grid">
@@ -68,7 +68,7 @@
             <th>Nickname</th>
             <th>Status</th>
             <th>GPU</th>
-            <th>Container</th>
+            <th>Runtime</th>
             <th>Port</th>
             <th>Actions</th>
           </tr>
@@ -78,8 +78,8 @@
     </section>
 
     <section class="card" style="margin-top:16px">
-      <h2>Managed Containers</h2>
-      <pre id="containersDump">[]</pre>
+      <h2>Managed Runtime Processes</h2>
+      <pre id="runtimesDump">[]</pre>
     </section>
   </div>
 
@@ -211,14 +211,14 @@
 
     async function refreshAll() {
       try {
-        const [health, gpus, models, containers] = await Promise.all([
+        const [health, gpus, models, runtimes] = await Promise.all([
           api('/api/admin/health'),
           api('/api/admin/gpus'),
           api('/api/admin/models'),
-          api('/api/admin/containers'),
+          api('/api/admin/runtimes'),
         ]);
 
-        document.getElementById('healthLine').textContent = `Status: ${health.status} | Docker: ${health.docker_connected} | GPUs: ${health.gpu_count}`;
+        document.getElementById('healthLine').textContent = `Status: ${health.status} | Runtime: ${health.runtime_mode} (${health.runtime_connected}) | GPUs: ${health.gpu_count}`;
         document.getElementById('gpus').innerHTML = gpus.map(g =>
           `<div>${g.gpu_id}: ${g.name} ${g.allocated ? '(allocated to ' + g.allocated_model_id + ')' : '(free)'}</div>`
         ).join('') || '<div class="muted">No GPUs detected</div>';
@@ -239,7 +239,7 @@
           if (activeInput) {
             nicknameDrafts[editingNicknameModelId] = activeInput.value;
           }
-          document.getElementById('containersDump').textContent = JSON.stringify(containers.containers, null, 2);
+          document.getElementById('runtimesDump').textContent = JSON.stringify(runtimes.runtimes, null, 2);
           return;
         }
 
@@ -269,7 +269,7 @@
               </td>
               <td>${statusBadge}</td>
               <td>${m.gpu_id || '-'}</td>
-              <td title="${m.container_id || ''}">${shortId(m.container_id)}</td>
+              <td title="${m.runtime_id || ''}">${shortId(m.runtime_id)}</td>
               <td>${m.port || '-'}</td>
               <td>
                 <div class="row">
@@ -281,7 +281,7 @@
             </tr>`;
         }).join('');
 
-        document.getElementById('containersDump').textContent = JSON.stringify(containers.containers, null, 2);
+        document.getElementById('runtimesDump').textContent = JSON.stringify(runtimes.runtimes, null, 2);
       } catch (err) {
         console.error(err);
         document.getElementById('downloadStatus').textContent = err.message;

@@ -24,7 +24,7 @@ class _ModelState:
     download_status: str = "not_downloaded"
     running: bool = False
     gpu_id: str | None = None
-    container_id: str | None = None
+    runtime_id: str | None = None
     port: int | None = None
     endpoint: str | None = None
     served_model_name: str | None = None
@@ -40,7 +40,7 @@ class _ModelState:
             download_status=self.download_status,
             running=self.running,
             gpu_id=self.gpu_id,
-            container_id=self.container_id,
+            runtime_id=self.runtime_id,
             port=self.port,
             endpoint=self.endpoint,
             served_model_name=self.served_model_name,
@@ -175,7 +175,7 @@ class ModelRegistry:
         self,
         model_id: str,
         *,
-        container_id: str,
+        runtime_id: str,
         gpu_id: str | None,
         port: int,
         endpoint: str,
@@ -191,7 +191,7 @@ class ModelRegistry:
             state.downloaded = True
             state.download_status = "ready"
             state.running = True
-            state.container_id = container_id
+            state.runtime_id = runtime_id
             state.gpu_id = gpu_id
             state.port = port
             state.endpoint = endpoint
@@ -203,7 +203,7 @@ class ModelRegistry:
         with self._lock:
             state = self._models[model_id]
             state.running = False
-            state.container_id = None
+            state.runtime_id = None
             state.gpu_id = None
             state.port = None
             state.endpoint = None
@@ -228,7 +228,7 @@ class ModelRegistry:
             if state is None:
                 return None
             state.running = False
-            state.container_id = None
+            state.runtime_id = None
             state.gpu_id = None
             state.port = None
             state.endpoint = None

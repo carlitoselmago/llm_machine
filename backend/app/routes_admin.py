@@ -11,9 +11,9 @@ from fastapi.templating import Jinja2Templates
 from .auth import get_services, require_admin
 from .model_registry import sanitize_model_id
 from .schemas import (
-    AdminContainersResponse,
     AdminHealthResponse,
     AdminRepoFilesResponse,
+    AdminRuntimesResponse,
     DownloadModelRequest,
     GpuInfo,
     ModelNicknameRequest,
@@ -33,11 +33,9 @@ def _http_error_from_exc(exc: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail=msg)
     if isinstance(exc, RuntimeError):
         detail_lower = msg.lower()
-        if "docker daemon is unavailable" in detail_lower:
-            return HTTPException(status_code=503, detail=msg)
         if "nvidia-smi not found" in detail_lower:
             return HTTPException(status_code=503, detail=msg)
-        if "docker gpu runtime is unavailable" in detail_lower:
+        if "runtime unavailable" in detail_lower:
             return HTTPException(status_code=503, detail=msg)
         if "missing config.json/params.json required by vllm" in detail_lower:
             return HTTPException(status_code=400, detail=msg)
@@ -47,7 +45,7 @@ def _http_error_from_exc(exc: Exception) -> HTTPException:
             return HTTPException(status_code=409, detail=msg)
         if "max_num_seqs" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
-        if "container is restarting repeatedly" in detail_lower:
+        if "runtime is restarting repeatedly" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
         if "still downloading" in detail_lower or "loading" in detail_lower or "unloading" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
@@ -77,10 +75,11 @@ async def admin_page(request: Request) -> HTMLResponse:
     dependencies=[Depends(require_admin)],
 )
 async def admin_health(services: AppServices = Depends(get_services)) -> AdminHealthResponse:
-    docker_ok, gpu_count = services.health()
+    runtime_ok, gpu_count = services.health()
     return AdminHealthResponse(
-        status="ok" if docker_ok else "degraded",
-        docker_connected=docker_ok,
+        status="ok" if runtime_ok else "degraded",
+        runtime_connected=runtime_ok,
+        runtime_mode="process",
         gpu_count=gpu_count,
     )
 
@@ -104,13 +103,23 @@ async def admin_models(services: AppServices = Depends(get_services)) -> list[Mo
 
 
 @router.get(
-    "/api/admin/containers",
-    response_model=AdminContainersResponse,
+    "/api/admin/runtimes",
+    response_model=AdminRuntimesResponse,
     dependencies=[Depends(require_admin)],
 )
-async def admin_containers(services: AppServices = Depends(get_services)) -> AdminContainersResponse:
-    containers = await run_in_threadpool(services.list_managed_containers)
-    return AdminContainersResponse(containers=containers)
+async def admin_runtimes(services: AppServices = Depends(get_services)) -> AdminRuntimesResponse:
+    runtimes = await run_in_threadpool(services.list_managed_runtimes)
+    return AdminRuntimesResponse(runtimes=runtimes)
+
+
+@router.get(
+    "/api/admin/containers",
+    response_model=AdminRuntimesResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def admin_containers_compat(services: AppServices = Depends(get_services)) -> AdminRuntimesResponse:
+    runtimes = await run_in_threadpool(services.list_managed_runtimes)
+    return AdminRuntimesResponse(runtimes=runtimes)
 
 
 @router.post(

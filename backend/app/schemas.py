@@ -45,7 +45,7 @@ class ModelInfo(BaseModel):
     download_status: str = "not_downloaded"
     running: bool = False
     gpu_id: str | None = None
-    container_id: str | None = None
+    runtime_id: str | None = None
     port: int | None = None
     endpoint: str | None = None
     served_model_name: str | None = None
@@ -61,12 +61,13 @@ class GpuInfo(BaseModel):
 
 class AdminHealthResponse(BaseModel):
     status: str
-    docker_connected: bool
+    runtime_connected: bool
+    runtime_mode: str = "process"
     gpu_count: int
 
 
-class AdminContainersResponse(BaseModel):
-    containers: list[dict[str, Any]]
+class AdminRuntimesResponse(BaseModel):
+    runtimes: list[dict[str, Any]]
 
 
 class AdminRepoFilesResponse(BaseModel):

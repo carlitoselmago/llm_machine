@@ -10,9 +10,9 @@ import httpx
 from huggingface_hub import HfApi, snapshot_download
 
 from .config import Config
-from .docker_manager import DockerManager, ManagedContainerRecord
 from .gpu_manager import GPUManager
 from .model_registry import ModelRegistry, sanitize_model_id
+from .process_manager import ManagedProcessRecord, ProcessManager
 from .schemas import DownloadModelRequest, GpuInfo, ModelInfo, StartModelRequest
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ class AppServices:
     config: Config
     registry: ModelRegistry
     gpu_manager: GPUManager
-    docker_manager: DockerManager
+    process_manager: ProcessManager
     http_client: httpx.AsyncClient
     _ops_lock: threading.RLock = field(default_factory=threading.RLock)
 
@@ -41,36 +41,32 @@ class AppServices:
             config=config,
             registry=ModelRegistry(config.models_dir),
             gpu_manager=GPUManager(),
-            docker_manager=DockerManager(config),
+            process_manager=ProcessManager(config),
             http_client=httpx.AsyncClient(timeout=config.request_timeout_seconds),
         )
 
     def startup(self) -> None:
         self.registry.ensure_models_dir()
-        try:
-            self.docker_manager.connect()
-        except RuntimeError as exc:
-            logger.warning("Docker unavailable; running in degraded mode: %s", exc)
+        self.process_manager.connect()
         try:
             self.gpu_manager.refresh()
         except RuntimeError as exc:
             logger.warning("GPU detection unavailable; continuing without GPUs: %s", exc)
         self.registry.sync_downloaded_from_disk()
-        if self.docker_manager.is_connected():
-            self.reconcile_runtime_state()
+        self.reconcile_runtime_state()
 
     def reconcile_runtime_state(self) -> None:
-        for rec in self.docker_manager.list_managed_containers():
+        for rec in self.process_manager.list_managed_processes():
             if not rec.model_id or rec.status != "running" or rec.host_port is None:
                 continue
             if rec.gpu_id:
                 try:
                     self.gpu_manager.reserve_existing(rec.gpu_id, rec.model_id)
                 except RuntimeError as exc:
-                    logger.warning("Failed to reserve GPU for %s: %s", rec.container_id, exc)
+                    logger.warning("Failed to reserve GPU for %s: %s", rec.process_id, exc)
             self.registry.mark_started(
                 rec.model_id,
-                container_id=rec.container_id,
+                runtime_id=rec.process_id,
                 gpu_id=rec.gpu_id or "",
                 port=rec.host_port,
                 endpoint=f"http://127.0.0.1:{rec.host_port}",
@@ -80,10 +76,10 @@ class AppServices:
 
     async def shutdown(self) -> None:
         await self.http_client.aclose()
-        self.docker_manager.close()
+        self.process_manager.close()
 
     def health(self) -> tuple[bool, int]:
-        return self.docker_manager.is_connected(), len(self.gpu_manager.list_gpus())
+        return self.process_manager.is_connected(), len(self.gpu_manager.list_gpus())
 
     def list_gpus(self) -> list[GpuInfo]:
         return self.gpu_manager.list_gpus()
@@ -97,12 +93,11 @@ class AppServices:
             self.registry.sync_downloaded_from_disk()
             return self.registry.set_nickname(model_id, nickname)
 
-    def list_managed_containers(self) -> list[dict[str, object]]:
-        if not self.docker_manager.is_connected():
-            return []
+    def list_managed_runtimes(self) -> list[dict[str, object]]:
         return [
             {
-                "container_id": rec.container_id,
+                "runtime_id": rec.process_id,
+                "pid": rec.pid,
                 "name": rec.name,
                 "status": rec.status,
                 "repo_id": rec.repo_id,
@@ -110,8 +105,9 @@ class AppServices:
                 "gpu_id": rec.gpu_id,
                 "host_port": rec.host_port,
                 "served_model_name": rec.served_model_name,
+                "log_file": rec.log_file,
             }
-            for rec in self.docker_manager.list_managed_containers()
+            for rec in self.process_manager.list_managed_processes()
         ]
 
     def download_model(self, req: DownloadModelRequest) -> ModelInfo:
@@ -149,7 +145,7 @@ class AppServices:
         config_json = os.path.join(local_path, "config.json")
         params_json = os.path.join(local_path, "params.json")
         if os.path.isfile(config_json) or os.path.isfile(params_json):
-            return _ModelLaunchSpec(model_ref=f"/models/{model_id}")
+            return _ModelLaunchSpec(model_ref=local_path)
 
         try:
             entries = os.listdir(local_path)
@@ -180,8 +176,8 @@ class AppServices:
                     gguf_name,
                 )
 
-            model_dir_ref = f"/models/{model_id}"
-            model_ref = f"{model_dir_ref}/{gguf_name}"
+            model_dir_ref = local_path
+            model_ref = os.path.join(model_dir_ref, gguf_name)
             tokenizer_markers = ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
             tokenizer_ref = model_dir_ref if any(os.path.isfile(os.path.join(local_path, marker)) for marker in tokenizer_markers) else None
             hf_config_path = repo_id if repo_id and "/" in repo_id else None
@@ -197,8 +193,6 @@ class AppServices:
 
     def start_model(self, model_id: str, options: StartModelRequest) -> ModelInfo:
         with self._ops_lock:
-            if not self.docker_manager.is_connected():
-                raise RuntimeError("Docker daemon is unavailable")
             self.registry.sync_downloaded_from_disk()
             state = self.registry.get_state(model_id)
             if state is None or not state.downloaded or not os.path.isdir(state.local_path):
@@ -214,7 +208,7 @@ class AppServices:
 
             self.registry.mark_loading(model_id)
             gpu_id: str | None = None
-            started: ManagedContainerRecord | None = None
+            started: ManagedProcessRecord | None = None
             try:
                 launch_spec = self._resolve_model_launch_spec(
                     model_id=model_id,
@@ -224,7 +218,7 @@ class AppServices:
 
                 gpu_id = self.gpu_manager.allocate(model_id)
                 used_ports = {m.port for m in self.registry.running_models() if m.port is not None}
-                host_port = self.docker_manager.find_free_host_port({int(p) for p in used_ports})
+                host_port = self.process_manager.find_free_host_port({int(p) for p in used_ports})
                 gpu_memory_utilization = options.gpu_memory_utilization
                 if gpu_memory_utilization is None:
                     gpu_memory_utilization = self.config.default_gpu_memory_utilization
@@ -239,8 +233,7 @@ class AppServices:
                 if max_model_len is None:
                     max_model_len = self.config.default_max_model_len
                 effective_served_model_name = options.served_model_name or state.nickname or model_id
-                self.docker_manager.pull_image_if_needed()
-                started = self.docker_manager.start_vllm_container(
+                started = self.process_manager.start_vllm_process(
                     model_id=model_id,
                     repo_id=state.repo_id,
                     gpu_id=gpu_id,
@@ -255,10 +248,10 @@ class AppServices:
                     gpu_memory_utilization=gpu_memory_utilization,
                     max_num_seqs=max_num_seqs,
                 )
-                self.docker_manager.wait_for_model_ready(host_port, container_id=started.container_id)
+                self.process_manager.wait_for_model_ready(host_port, runtime_id=started.process_id)
                 return self.registry.mark_started(
                     model_id,
-                    container_id=started.container_id,
+                    runtime_id=started.process_id,
                     gpu_id=gpu_id,
                     port=host_port,
                     endpoint=f"http://127.0.0.1:{host_port}",
@@ -269,7 +262,7 @@ class AppServices:
                 logger.exception("Failed to start model %s", model_id)
                 if started is not None:
                     try:
-                        self.docker_manager.stop_and_remove_container(started.container_id)
+                        self.process_manager.stop_process(started.process_id)
                     except Exception:  # noqa: BLE001
                         logger.exception("Cleanup failed after start error for %s", model_id)
                 if gpu_id is not None:
@@ -279,18 +272,16 @@ class AppServices:
 
     def stop_model(self, model_id: str) -> ModelInfo:
         with self._ops_lock:
-            if not self.docker_manager.is_connected():
-                raise RuntimeError("Docker daemon is unavailable")
             state = self.registry.get_state(model_id)
             if state is None:
                 raise FileNotFoundError(f"Model {model_id} not found")
             if state.download_status == "unloading":
                 raise RuntimeError(f"Model {model_id} is already unloading")
-            if not state.running or not state.container_id:
+            if not state.running or not state.runtime_id:
                 raise RuntimeError(f"Model {model_id} is not running")
             self.registry.mark_unloading(model_id)
             try:
-                self.docker_manager.stop_and_remove_container(state.container_id)
+                self.process_manager.stop_process(state.runtime_id)
                 if state.gpu_id:
                     self.gpu_manager.release(state.gpu_id)
                 return self.registry.mark_stopped(model_id)
