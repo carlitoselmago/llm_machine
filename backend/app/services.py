@@ -180,7 +180,10 @@ class AppServices:
             model_ref = os.path.join(model_dir_ref, gguf_name)
             tokenizer_markers = ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
             tokenizer_ref = model_dir_ref if any(os.path.isfile(os.path.join(local_path, marker)) for marker in tokenizer_markers) else None
-            hf_config_path = repo_id if repo_id and "/" in repo_id else None
+            # For GGUF models, passing hf-config-path often breaks startup when the
+            # upstream repo does not expose a valid Transformers config for vLLM.
+            # Let vLLM use local tokenizer artifacts if present.
+            hf_config_path = None
             return _ModelLaunchSpec(
                 model_ref=model_ref,
                 tokenizer_ref=tokenizer_ref,
