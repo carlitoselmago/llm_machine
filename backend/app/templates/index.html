@@ -90,10 +90,15 @@
         ...options,
       });
       const text = await res.text();
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
       let data;
       try { data = text ? JSON.parse(text) : null; } catch { data = text; }
       if (!res.ok) {
-        const detail = data?.detail || data?.error?.message || text || `HTTP ${res.status}`;
+        let detail = data?.detail || data?.error?.message || text || `HTTP ${res.status}`;
+        const looksLikeHtml = contentType.includes('text/html') || /<html|<!doctype/i.test(String(text || ''));
+        if (looksLikeHtml) {
+          detail = `HTTP ${res.status}. Upstream proxy returned HTML (likely timeout while model is starting). Wait 1-2 minutes and press Refresh.`;
+        }
         throw new Error(detail);
       }
       return data;

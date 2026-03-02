@@ -171,6 +171,28 @@ class ModelRegistry:
             state.error = None
             return state.to_model_info()
 
+    def mark_loading_runtime(
+        self,
+        model_id: str,
+        *,
+        runtime_id: str,
+        gpu_id: str,
+        port: int,
+        endpoint: str,
+        served_model_name: str | None = None,
+    ) -> ModelInfo:
+        with self._lock:
+            state = self._models[model_id]
+            state.download_status = "loading"
+            state.running = False
+            state.runtime_id = runtime_id
+            state.gpu_id = gpu_id
+            state.port = port
+            state.endpoint = endpoint
+            state.served_model_name = served_model_name
+            state.error = None
+            return state.to_model_info()
+
     def mark_started(
         self,
         model_id: str,

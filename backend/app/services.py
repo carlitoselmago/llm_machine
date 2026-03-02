@@ -244,16 +244,23 @@ class AppServices:
                     gpu_memory_utilization=gpu_memory_utilization,
                     max_num_seqs=max_num_seqs,
                 )
-                self.process_manager.wait_for_model_ready(host_port, runtime_id=started.process_id)
-                return self.registry.mark_started(
+                loading_info = self.registry.mark_loading_runtime(
                     model_id,
                     runtime_id=started.process_id,
                     gpu_id=gpu_id,
                     port=host_port,
                     endpoint=f"http://127.0.0.1:{host_port}",
                     served_model_name=effective_served_model_name,
-                    repo_id=state.repo_id,
                 )
+                self._start_readiness_watcher(
+                    model_id=model_id,
+                    repo_id=state.repo_id,
+                    runtime_id=started.process_id,
+                    gpu_id=gpu_id,
+                    host_port=host_port,
+                    served_model_name=effective_served_model_name,
+                )
+                return loading_info
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Failed to start model %s", model_id)
                 if started is not None:
@@ -265,6 +272,67 @@ class AppServices:
                     self.gpu_manager.release(gpu_id)
                 self.registry.mark_start_failed(model_id, str(exc))
                 raise
+
+    def _start_readiness_watcher(
+        self,
+        *,
+        model_id: str,
+        repo_id: str,
+        runtime_id: str,
+        gpu_id: str,
+        host_port: int,
+        served_model_name: str | None,
+    ) -> None:
+        watcher = threading.Thread(
+            target=self._await_model_ready_worker,
+            kwargs={
+                "model_id": model_id,
+                "repo_id": repo_id,
+                "runtime_id": runtime_id,
+                "gpu_id": gpu_id,
+                "host_port": host_port,
+                "served_model_name": served_model_name,
+            },
+            daemon=True,
+        )
+        watcher.start()
+
+    def _await_model_ready_worker(
+        self,
+        *,
+        model_id: str,
+        repo_id: str,
+        runtime_id: str,
+        gpu_id: str,
+        host_port: int,
+        served_model_name: str | None,
+    ) -> None:
+        try:
+            self.process_manager.wait_for_model_ready(host_port, runtime_id=runtime_id)
+            with self._ops_lock:
+                state = self.registry.get_state(model_id)
+                if state is None:
+                    return
+                if state.runtime_id != runtime_id:
+                    return
+                self.registry.mark_started(
+                    model_id,
+                    runtime_id=runtime_id,
+                    gpu_id=gpu_id,
+                    port=host_port,
+                    endpoint=f"http://127.0.0.1:{host_port}",
+                    served_model_name=served_model_name,
+                    repo_id=repo_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Model readiness failed for %s", model_id)
+            with self._ops_lock:
+                try:
+                    self.process_manager.stop_process(runtime_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed stopping runtime after readiness failure for %s", model_id)
+                self.gpu_manager.release(gpu_id)
+                self.registry.mark_start_failed(model_id, str(exc))
 
     def stop_model(self, model_id: str) -> ModelInfo:
         with self._ops_lock:
