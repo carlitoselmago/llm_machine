@@ -397,7 +397,7 @@ async function loadModels() {
     if (!modelOptions.length) {
       const option = document.createElement("option");
       option.value = "";
-      option.textContent = "No running models available (start one in /admin)";
+      option.textContent = "No running models available";
       select.appendChild(option);
     }
 

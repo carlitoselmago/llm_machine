@@ -24,4 +24,4 @@ COPY runpod-start.sh /app/runpod-start.sh
 RUN chmod +x /app/runpod-start.sh
 
 EXPOSE 8080
-CMD ["/app/runpod-start.sh"]
+ENTRYPOINT ["/app/runpod-start.sh"]

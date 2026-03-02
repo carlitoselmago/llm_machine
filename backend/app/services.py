@@ -222,13 +222,9 @@ class AppServices:
                 gpu_memory_utilization = options.gpu_memory_utilization
                 if gpu_memory_utilization is None:
                     gpu_memory_utilization = self.config.default_gpu_memory_utilization
-                if gpu_memory_utilization is None:
-                    gpu_memory_utilization = 0.75
                 max_num_seqs = options.max_num_seqs
                 if max_num_seqs is None:
                     max_num_seqs = self.config.default_max_num_seqs
-                if max_num_seqs is None:
-                    max_num_seqs = 64
                 max_model_len = options.max_model_len
                 if max_model_len is None:
                     max_model_len = self.config.default_max_model_len

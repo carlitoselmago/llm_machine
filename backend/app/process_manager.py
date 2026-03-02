@@ -218,7 +218,7 @@ class ProcessManager:
         finally:
             sock.close()
 
-    def _log_tail(self, process_id: str, max_lines: int = 25) -> str:
+    def _log_tail(self, process_id: str, max_lines: int = 80) -> str:
         with self._lock:
             found = self._processes.get(process_id)
             if not found:
