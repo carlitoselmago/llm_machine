@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import shutil
 import threading
 from dataclasses import dataclass, field
@@ -141,12 +142,45 @@ class AppServices:
         return sorted(files)
 
     @staticmethod
-    def _resolve_model_launch_spec(*, model_id: str, repo_id: str, local_path: str) -> _ModelLaunchSpec:
+    def _extract_base_model_from_readme(local_path: str) -> str | None:
+        readme_path = os.path.join(local_path, "README.md")
+        if not os.path.isfile(readme_path):
+            return None
+        try:
+            with open(readme_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(128 * 1024)
+        except OSError:
+            return None
+
+        single_line = re.search(
+            r"(?im)^\s*base_model\s*:\s*['\"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)['\"]?\s*$",
+            text,
+        )
+        if single_line:
+            return single_line.group(1).strip()
+
+        block = re.search(r"(?ims)^\s*base_model\s*:\s*\n(?P<body>(?:\s*-\s*.+\n)+)", text)
+        if block:
+            first_item = re.search(
+                r"(?im)^\s*-\s*['\"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)['\"]?\s*$",
+                block.group("body"),
+            )
+            if first_item:
+                return first_item.group(1).strip()
+        return None
+
+    @classmethod
+    def _resolve_model_launch_spec(
+        cls,
+        *,
+        model_id: str,
+        repo_id: str,
+        local_path: str,
+        preferred_gguf_file: str | None = None,
+        tokenizer_override: str | None = None,
+    ) -> _ModelLaunchSpec:
         config_json = os.path.join(local_path, "config.json")
         params_json = os.path.join(local_path, "params.json")
-        if os.path.isfile(config_json) or os.path.isfile(params_json):
-            return _ModelLaunchSpec(model_ref=local_path)
-
         try:
             entries = os.listdir(local_path)
         except OSError as exc:
@@ -158,7 +192,13 @@ class AppServices:
             if name.lower().endswith(".gguf") and os.path.isfile(os.path.join(local_path, name))
         )
         if len(gguf_files) >= 1:
-            if len(gguf_files) == 1:
+            if preferred_gguf_file:
+                if preferred_gguf_file not in gguf_files:
+                    raise RuntimeError(
+                        f"Requested GGUF file '{preferred_gguf_file}' not found in model directory"
+                    )
+                gguf_name = preferred_gguf_file
+            elif len(gguf_files) == 1:
                 gguf_name = gguf_files[0]
             else:
                 sized_gguf_files: list[tuple[int, str]] = []
@@ -178,17 +218,36 @@ class AppServices:
 
             model_dir_ref = local_path
             model_ref = os.path.join(model_dir_ref, gguf_name)
-            tokenizer_markers = ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
-            tokenizer_ref = model_dir_ref if any(os.path.isfile(os.path.join(local_path, marker)) for marker in tokenizer_markers) else None
-            # For GGUF models, passing hf-config-path often breaks startup when the
-            # upstream repo does not expose a valid Transformers config for vLLM.
-            # Let vLLM use local tokenizer artifacts if present.
-            hf_config_path = None
+            has_tokenizer_json = os.path.isfile(os.path.join(local_path, "tokenizer.json"))
+            has_tokenizer_model = os.path.isfile(os.path.join(local_path, "tokenizer.model"))
+            if tokenizer_override:
+                tokenizer_ref = tokenizer_override
+            elif has_tokenizer_json or has_tokenizer_model:
+                tokenizer_ref = model_dir_ref
+            else:
+                inferred_base_model = cls._extract_base_model_from_readme(local_path)
+                if inferred_base_model:
+                    tokenizer_ref = inferred_base_model
+                    logger.info(
+                        "No local tokenizer artifacts for GGUF model %s; using inferred base tokenizer: %s",
+                        model_id,
+                        inferred_base_model,
+                    )
+                else:
+                    tokenizer_ref = repo_id
+                    logger.info(
+                        "No local tokenizer artifacts for GGUF model %s; falling back to repo tokenizer: %s",
+                        model_id,
+                        repo_id,
+                    )
+            hf_config_path = model_dir_ref if (os.path.isfile(config_json) or os.path.isfile(params_json)) else None
             return _ModelLaunchSpec(
                 model_ref=model_ref,
                 tokenizer_ref=tokenizer_ref,
                 hf_config_path=hf_config_path,
             )
+        if os.path.isfile(config_json) or os.path.isfile(params_json):
+            return _ModelLaunchSpec(model_ref=local_path, tokenizer_ref=tokenizer_override)
         raise RuntimeError(
             "Model directory is missing config.json/params.json required by vLLM. "
             "or GGUF files. Use a compatible Hugging Face Transformers model."
@@ -213,10 +272,14 @@ class AppServices:
             gpu_id: str | None = None
             started: ManagedProcessRecord | None = None
             try:
+                preferred_gguf_file = options.gguf_file.strip() if options.gguf_file else None
+                tokenizer_override = options.tokenizer_id.strip() if options.tokenizer_id else None
                 launch_spec = self._resolve_model_launch_spec(
                     model_id=model_id,
                     repo_id=state.repo_id,
                     local_path=state.local_path,
+                    preferred_gguf_file=preferred_gguf_file,
+                    tokenizer_override=tokenizer_override,
                 )
 
                 gpu_id = self.gpu_manager.allocate(model_id)

@@ -25,6 +25,8 @@ class DownloadModelRequest(BaseModel):
 class StartModelRequest(BaseModel):
     model_id: str | None = None
     served_model_name: str | None = None
+    gguf_file: str | None = None
+    tokenizer_id: str | None = None
     trust_remote_code: bool = False
     dtype: str | None = None
     max_model_len: int | None = None

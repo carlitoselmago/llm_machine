@@ -39,6 +39,8 @@ def _http_error_from_exc(exc: Exception) -> HTTPException:
             return HTTPException(status_code=503, detail=msg)
         if "missing config.json/params.json required by vllm" in detail_lower:
             return HTTPException(status_code=400, detail=msg)
+        if "requested gguf file" in detail_lower and "not found in model directory" in detail_lower:
+            return HTTPException(status_code=400, detail=msg)
         if "free memory on device" in detail_lower or "gpu memory utilization" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
         if "out of memory" in detail_lower or "cuda out of memory" in detail_lower:
