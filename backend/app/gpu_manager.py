@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import subprocess
@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 class _GpuRecord:
     gpu_id: str
     name: str
+    free_memory_mb: int | None = None
+    total_memory_mb: int | None = None
     allocated_model_id: str | None = None
 
 
@@ -23,7 +25,11 @@ class GPUManager:
         self._gpus: dict[str, _GpuRecord] = {}
 
     def refresh(self) -> list[GpuInfo]:
-        cmd = ["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"]
+        cmd = [
+            "nvidia-smi",
+            "--query-gpu=index,name,memory.free,memory.total",
+            "--format=csv,noheader,nounits",
+        ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         except FileNotFoundError as exc:
@@ -36,14 +42,24 @@ class GPUManager:
             line = raw_line.strip()
             if not line:
                 continue
-            parts = [part.strip() for part in line.split(",", maxsplit=1)]
-            if len(parts) != 2:
+            parts = [part.strip() for part in line.split(",", maxsplit=3)]
+            if len(parts) != 4:
                 continue
-            gpu_id, name = parts
+            gpu_id, name, free_mem_raw, total_mem_raw = parts
+            try:
+                free_mem = int(free_mem_raw)
+            except ValueError:
+                free_mem = None
+            try:
+                total_mem = int(total_mem_raw)
+            except ValueError:
+                total_mem = None
             previous = self._gpus.get(gpu_id)
             discovered[gpu_id] = _GpuRecord(
                 gpu_id=gpu_id,
                 name=name,
+                free_memory_mb=free_mem,
+                total_memory_mb=total_mem,
                 allocated_model_id=previous.allocated_model_id if previous else None,
             )
 
@@ -63,14 +79,56 @@ class GPUManager:
                 for rec in sorted(self._gpus.values(), key=lambda r: int(r.gpu_id))
             ]
 
-    def allocate(self, model_id: str) -> str:
+    def allocate(self, model_id: str, min_free_ratio: float | None = None) -> str:
         with self._lock:
-            for gpu_id in sorted(self._gpus.keys(), key=lambda x: int(x)):
-                rec = self._gpus[gpu_id]
-                if rec.allocated_model_id is None:
-                    rec.allocated_model_id = model_id
-                    logger.info("Allocated GPU %s to model %s", gpu_id, model_id)
-                    return gpu_id
+            candidates = [rec for rec in self._gpus.values() if rec.allocated_model_id is None]
+            if min_free_ratio is not None:
+                threshold = max(0.0, min(float(min_free_ratio), 1.0))
+                eligible = [
+                    rec
+                    for rec in candidates
+                    if rec.free_memory_mb is None
+                    or rec.total_memory_mb is None
+                    or rec.total_memory_mb <= 0
+                    or (rec.free_memory_mb / rec.total_memory_mb) >= threshold
+                ]
+                if not eligible:
+                    observed = []
+                    for rec in sorted(candidates, key=lambda r: int(r.gpu_id)):
+                        if rec.free_memory_mb is None or rec.total_memory_mb is None or rec.total_memory_mb <= 0:
+                            observed.append(f"{rec.gpu_id}:unknown")
+                        else:
+                            ratio = rec.free_memory_mb / rec.total_memory_mb
+                            observed.append(
+                                f"{rec.gpu_id}:{rec.free_memory_mb}/{rec.total_memory_mb}MiB ({ratio:.2f})"
+                            )
+                    observed_text = ", ".join(observed) if observed else "none"
+                    raise RuntimeError(
+                        "No free GPU meets required free-memory ratio "
+                        f"{threshold:.2f}. Available free ratios: {observed_text}. "
+                        "Lower GPU memory utilization or free GPU memory."
+                    )
+                candidates = eligible
+            candidates.sort(
+                key=lambda rec: (
+                    rec.free_memory_mb if rec.free_memory_mb is not None else -1,
+                    -int(rec.gpu_id),
+                ),
+                reverse=True,
+            )
+            for rec in candidates:
+                rec.allocated_model_id = model_id
+                if rec.free_memory_mb is not None and rec.total_memory_mb is not None:
+                    logger.info(
+                        "Allocated GPU %s to model %s (free %s MiB / total %s MiB)",
+                        rec.gpu_id,
+                        model_id,
+                        rec.free_memory_mb,
+                        rec.total_memory_mb,
+                    )
+                else:
+                    logger.info("Allocated GPU %s to model %s", rec.gpu_id, model_id)
+                return rec.gpu_id
         raise RuntimeError("No free GPU available")
 
     def reserve_existing(self, gpu_id: str, model_id: str) -> None:

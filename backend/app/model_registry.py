@@ -1,11 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import json
 import os
 import re
 import threading
 from dataclasses import dataclass
 
 from .schemas import ModelInfo
+
+MODEL_META_FILENAME = ".llm_orchestrator.json"
 
 
 def sanitize_model_id(value: str) -> str:
@@ -66,10 +69,17 @@ class ModelRegistry:
                 if not os.path.isdir(full_path):
                     continue
                 model_id = sanitize_model_id(name)
+                persisted_repo_id = self._read_persisted_repo_id(full_path)
                 state = self._models.get(model_id)
                 if state is None:
-                    state = _ModelState(repo_id=name, model_id=model_id, local_path=full_path)
+                    state = _ModelState(
+                        repo_id=persisted_repo_id or name,
+                        model_id=model_id,
+                        local_path=full_path,
+                    )
                     self._models[model_id] = state
+                elif persisted_repo_id:
+                    state.repo_id = persisted_repo_id
                 state.local_path = full_path
                 if state.download_status == "downloading":
                     state.downloaded = False
@@ -125,6 +135,7 @@ class ModelRegistry:
             state.downloaded = True
             state.download_status = "downloaded"
             state.error = None
+            self._persist_repo_id(state.local_path, state.repo_id)
             return state.to_model_info()
 
     def mark_download_failed(self, repo_id: str, error: str) -> ModelInfo:
@@ -154,6 +165,7 @@ class ModelRegistry:
                     }:
                         raise RuntimeError(f"Nickname '{desired}' is already used by another model")
             state.nickname = desired
+            self._persist_repo_id(state.local_path, state.repo_id)
             return state.to_model_info()
 
     def mark_loading(self, model_id: str) -> ModelInfo:
@@ -210,6 +222,7 @@ class ModelRegistry:
                 state = self._get_or_create(repo_id or model_id)
             if repo_id:
                 state.repo_id = repo_id
+            self._persist_repo_id(state.local_path, state.repo_id)
             state.downloaded = True
             state.download_status = "ready"
             state.running = True
@@ -309,3 +322,30 @@ class ModelRegistry:
                 if candidate.nickname == requested_model:
                     return candidate
             return None
+
+    @staticmethod
+    def _persist_repo_id(local_path: str, repo_id: str) -> None:
+        if not local_path or not os.path.isdir(local_path):
+            return
+        meta_path = os.path.join(local_path, MODEL_META_FILENAME)
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump({"repo_id": repo_id}, f)
+        except OSError:
+            return
+
+    @staticmethod
+    def _read_persisted_repo_id(local_path: str) -> str | None:
+        meta_path = os.path.join(local_path, MODEL_META_FILENAME)
+        if not os.path.isfile(meta_path):
+            return None
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+        repo_id = payload.get("repo_id")
+        if not isinstance(repo_id, str):
+            return None
+        repo_id = repo_id.strip()
+        return repo_id or None

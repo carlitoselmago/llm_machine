@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from typing import Annotated
@@ -42,6 +42,8 @@ def _http_error_from_exc(exc: Exception) -> HTTPException:
         if "requested gguf file" in detail_lower and "not found in model directory" in detail_lower:
             return HTTPException(status_code=400, detail=msg)
         if "free memory on device" in detail_lower or "gpu memory utilization" in detail_lower:
+            return HTTPException(status_code=409, detail=msg)
+        if "free-memory ratio" in detail_lower or "lower gpu memory utilization" in detail_lower:
             return HTTPException(status_code=409, detail=msg)
         if "out of memory" in detail_lower or "cuda out of memory" in detail_lower:
             return HTTPException(status_code=409, detail=msg)

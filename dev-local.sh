@@ -31,6 +31,19 @@ else
   ./.venv/bin/python -m pip install --disable-pip-version-check -r backend/requirements.txt
 fi
 
+export PATH="$ROOT_DIR/.venv/bin:$PATH"
+
+if [[ -z "${VLLM_EXECUTABLE:-}" ]]; then
+  if [[ -x "$ROOT_DIR/.venv/bin/vllm" ]]; then
+    export VLLM_EXECUTABLE="$ROOT_DIR/.venv/bin/vllm"
+  elif command -v vllm >/dev/null 2>&1; then
+    export VLLM_EXECUTABLE="$(command -v vllm)"
+  else
+    echo "[dev-local] vLLM is not installed in this environment."
+    echo "[dev-local] Install with: ./.venv/bin/python -m pip install vllm"
+  fi
+fi
+
 export MODELS_DIR="$ROOT_DIR/models"
 export ADMIN_USERNAME="admin"
 export ADMIN_PASSWORD="workshop"

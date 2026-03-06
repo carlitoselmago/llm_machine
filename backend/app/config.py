@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -22,6 +22,12 @@ def _optional_int_env(name: str) -> int | None:
     if not value:
         return None
     return int(value)
+
+
+def _clean_text_env(name: str, default: str) -> str:
+    raw = os.getenv(name, default)
+    value = raw.strip()
+    return value.strip("\"'")
 
 
 @dataclass(slots=True)
@@ -51,7 +57,7 @@ class Config:
             host=os.getenv("HOST", "0.0.0.0"),
             port=int(os.getenv("PORT", "8080")),
             models_dir=os.getenv("MODELS_DIR", "/models"),
-            vllm_executable=os.getenv("VLLM_EXECUTABLE", "vllm"),
+            vllm_executable=_clean_text_env("VLLM_EXECUTABLE", "vllm"),
             vllm_internal_port=int(os.getenv("VLLM_INTERNAL_PORT", "8000")),
             host_port_start=int(os.getenv("HOST_PORT_START", "8001")),
             host_port_end=int(os.getenv("HOST_PORT_END", "8999")),

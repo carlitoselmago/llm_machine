@@ -48,10 +48,6 @@
           </select>
           <button id="downloadBtn">Download</button>
         </div>
-        <div class="row" style="margin-top:8px">
-          <label for="tokenizerId" class="muted">Tokenizer override:</label>
-          <input id="tokenizerId" type="text" placeholder="unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit" style="flex:1; min-width:280px" />
-        </div>
         <p id="downloadStatus" class="muted"></p>
       </section>
 
@@ -318,8 +314,6 @@
     async function startModel(modelId) {
       try {
         const payload = { model_id: modelId };
-        const tokenizerId = document.getElementById('tokenizerId')?.value?.trim();
-        if (tokenizerId) payload.tokenizer_id = tokenizerId;
         await api(`/api/admin/models/${encodeURIComponent(modelId)}/start`, { method: 'POST', body: JSON.stringify(payload) });
         await refreshAll();
       } catch (err) {
@@ -364,6 +358,8 @@
         if (selected) {
           payload.allow_patterns = [
             selected,
+            'README.md',
+            '*.md',
             '*.json',
             '*.txt',
             '*.model',

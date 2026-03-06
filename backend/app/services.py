@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
@@ -83,6 +83,11 @@ class AppServices:
         return self.process_manager.is_connected(), len(self.gpu_manager.list_gpus())
 
     def list_gpus(self) -> list[GpuInfo]:
+        # Refresh before returning so the admin UI reflects current VRAM usage.
+        try:
+            self.gpu_manager.refresh()
+        except RuntimeError as exc:
+            logger.warning("GPU refresh failed while listing GPUs: %s", exc)
         return self.gpu_manager.list_gpus()
 
     def list_models(self) -> list[ModelInfo]:
@@ -169,9 +174,141 @@ class AppServices:
                 return first_item.group(1).strip()
         return None
 
-    @classmethod
+    def _infer_base_model_from_repo_metadata(self, repo_id: str) -> str | None:
+        def _fetch_with_token(token: str | None):
+            api = HfApi(token=token)
+            try:
+                return api.model_info(repo_id=repo_id, repo_type="model")
+            except TypeError:
+                return api.model_info(repo_id=repo_id)
+
+        try:
+            info = _fetch_with_token(self.config.hf_token)
+        except Exception:
+            try:
+                info = _fetch_with_token(None)
+            except Exception:
+                return None
+
+        card_data = getattr(info, "card_data", None)
+        if card_data is None:
+            return None
+        if hasattr(card_data, "to_dict"):
+            try:
+                card_data = card_data.to_dict()
+            except Exception:
+                return None
+        if not isinstance(card_data, dict):
+            return None
+
+        for key in ("base_model", "base_models", "baseModel"):
+            value = card_data.get(key)
+            if isinstance(value, str):
+                candidate = value.strip()
+                if candidate:
+                    return candidate
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
+        return None
+
+    @staticmethod
+    def _base_model_from_repo_name(repo_id: str) -> str | None:
+        name = repo_id.split("/", 1)[1] if "/" in repo_id else repo_id
+        stripped = re.sub(r"(?i)[._-]?gguf.*$", "", name).strip("._- ")
+        if stripped and "/" not in stripped:
+            return stripped
+        return None
+
+    @staticmethod
+    def _add_unique(items: list[str], value: str | None) -> None:
+        if not value:
+            return
+        candidate = value.strip()
+        if not candidate or candidate in items:
+            return
+        items.append(candidate)
+
+    def _expand_tokenizer_candidates(self, initial_candidates: list[str]) -> list[str]:
+        expanded: list[str] = []
+        for candidate in initial_candidates:
+            self._add_unique(expanded, candidate)
+            if "/" in candidate:
+                self._add_unique(expanded, candidate.split("/", 1)[1])
+
+        seed_values = list(expanded)
+        for candidate in seed_values:
+            slug = candidate.split("/", 1)[1] if "/" in candidate else candidate
+            parts = [part for part in re.split(r"[-_]+", slug) if part]
+            for end_idx in range(len(parts), 0, -1):
+                self._add_unique(expanded, "-".join(parts[:end_idx]))
+
+        lowered = [item.lower() for item in expanded]
+        if any("gpt2-xl" in item for item in lowered):
+            self._add_unique(expanded, "gpt2-xl")
+            self._add_unique(expanded, "openai-community/gpt2-xl")
+        if any("gpt2" in item for item in lowered):
+            self._add_unique(expanded, "gpt2")
+            self._add_unique(expanded, "openai-community/gpt2")
+
+        return expanded
+
+    def _select_tokenizer_ref(
+        self,
+        *,
+        model_id: str,
+        repo_id: str,
+        local_path: str,
+        tokenizer_override: str | None = None,
+    ) -> str:
+        candidates: list[str] = []
+        if tokenizer_override:
+            self._add_unique(candidates, tokenizer_override)
+
+        self._add_unique(candidates, local_path)
+        self._add_unique(candidates, self._extract_base_model_from_readme(local_path))
+        self._add_unique(candidates, self._infer_base_model_from_repo_metadata(repo_id))
+        self._add_unique(candidates, self._base_model_from_repo_name(repo_id))
+
+        self._add_unique(candidates, repo_id)
+        if "/" not in repo_id and "_" in repo_id:
+            self._add_unique(candidates, repo_id.replace("_", "/", 1))
+
+        candidates = self._expand_tokenizer_candidates(candidates)
+
+        if not candidates:
+            raise RuntimeError(f"Could not determine tokenizer reference for model {model_id}")
+
+        try:
+            from transformers import AutoTokenizer  # type: ignore
+        except Exception:
+            selected = candidates[0]
+            logger.info("Tokenizer candidates for %s: %s (validation unavailable)", model_id, candidates)
+            logger.info("Selected tokenizer for %s: %s", model_id, selected)
+            return selected
+
+        errors: list[str] = []
+        for ref in candidates:
+            try:
+                AutoTokenizer.from_pretrained(ref, trust_remote_code=True)
+                logger.info("Tokenizer candidates for %s: %s", model_id, candidates)
+                logger.info("Selected tokenizer for %s: %s", model_id, ref)
+                return ref
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{ref}: {exc}")
+
+        if tokenizer_override:
+            raise RuntimeError(
+                f"Tokenizer override '{tokenizer_override}' is invalid. Validation errors: {' | '.join(errors[-3:])}"
+            )
+        raise RuntimeError(
+            f"No valid tokenizer source found for {model_id}. Tried: {', '.join(candidates)}. "
+            f"Last errors: {' | '.join(errors[-3:])}"
+        )
+
     def _resolve_model_launch_spec(
-        cls,
+        self,
         *,
         model_id: str,
         repo_id: str,
@@ -218,28 +355,12 @@ class AppServices:
 
             model_dir_ref = local_path
             model_ref = os.path.join(model_dir_ref, gguf_name)
-            has_tokenizer_json = os.path.isfile(os.path.join(local_path, "tokenizer.json"))
-            has_tokenizer_model = os.path.isfile(os.path.join(local_path, "tokenizer.model"))
-            if tokenizer_override:
-                tokenizer_ref = tokenizer_override
-            elif has_tokenizer_json or has_tokenizer_model:
-                tokenizer_ref = model_dir_ref
-            else:
-                inferred_base_model = cls._extract_base_model_from_readme(local_path)
-                if inferred_base_model:
-                    tokenizer_ref = inferred_base_model
-                    logger.info(
-                        "No local tokenizer artifacts for GGUF model %s; using inferred base tokenizer: %s",
-                        model_id,
-                        inferred_base_model,
-                    )
-                else:
-                    tokenizer_ref = repo_id
-                    logger.info(
-                        "No local tokenizer artifacts for GGUF model %s; falling back to repo tokenizer: %s",
-                        model_id,
-                        repo_id,
-                    )
+            tokenizer_ref = self._select_tokenizer_ref(
+                model_id=model_id,
+                repo_id=repo_id,
+                local_path=local_path,
+                tokenizer_override=tokenizer_override,
+            )
             hf_config_path = model_dir_ref if (os.path.isfile(config_json) or os.path.isfile(params_json)) else None
             return _ModelLaunchSpec(
                 model_ref=model_ref,
@@ -255,6 +376,8 @@ class AppServices:
 
     def start_model(self, model_id: str, options: StartModelRequest) -> ModelInfo:
         with self._ops_lock:
+            # Refresh right before allocation to avoid stale free-memory checks.
+            self.gpu_manager.refresh()
             self.registry.sync_downloaded_from_disk()
             state = self.registry.get_state(model_id)
             if state is None or not state.downloaded or not os.path.isdir(state.local_path):
@@ -282,9 +405,6 @@ class AppServices:
                     tokenizer_override=tokenizer_override,
                 )
 
-                gpu_id = self.gpu_manager.allocate(model_id)
-                used_ports = {m.port for m in self.registry.running_models() if m.port is not None}
-                host_port = self.process_manager.find_free_host_port({int(p) for p in used_ports})
                 gpu_memory_utilization = options.gpu_memory_utilization
                 if gpu_memory_utilization is None:
                     gpu_memory_utilization = self.config.default_gpu_memory_utilization
@@ -294,6 +414,9 @@ class AppServices:
                 max_model_len = options.max_model_len
                 if max_model_len is None:
                     max_model_len = self.config.default_max_model_len
+                gpu_id = self.gpu_manager.allocate(model_id, min_free_ratio=gpu_memory_utilization)
+                used_ports = {m.port for m in self.registry.running_models() if m.port is not None}
+                host_port = self.process_manager.find_free_host_port({int(p) for p in used_ports})
                 effective_served_model_name = options.served_model_name or state.nickname or model_id
                 started = self.process_manager.start_vllm_process(
                     model_id=model_id,

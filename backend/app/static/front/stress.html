@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Stress Test</title>
+  <style>
+    body { margin: 0; background: #0b1020; color: #f8fafc; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .toolbar, .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .panel { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 14px; margin-top: 12px; }
+    input, select, button, textarea { background: #0b1220; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 8px 10px; }
+    textarea { width: 100%; min-height: 80px; resize: vertical; }
+    button { cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+    .metric { background: #0a0f1f; border: 1px solid #23304a; border-radius: 8px; padding: 10px; }
+    .metric .label { color: #94a3b8; font-size: 12px; }
+    .metric .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+    canvas { width: 100%; height: 220px; background: #0a0f1f; border: 1px solid #23304a; border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #253044; padding: 7px; text-align: left; }
+    #errors { white-space: pre-wrap; background: #0a0f1f; border: 1px solid #23304a; border-radius: 8px; padding: 8px; min-height: 60px; }
+    a { color: #60a5fa; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="toolbar">
+      <h1>Live Stress Test</h1>
+      <span class="muted">Simulates concurrent streaming clients on one model.</span>
+      <a href="/">← Back to client</a>
+    </div>
+
+    <div class="panel">
+      <h2>Setup</h2>
+      <div class="row">
+        <label>API URL <input id="apiUrl" type="text" style="min-width:260px" value="http://127.0.0.1:8080" /></label>
+        <label>Model <select id="model" style="min-width:280px"></select></label>
+        <button id="reloadModelsBtn">Reload models</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>Clients <input id="clients" type="number" min="1" max="200" value="6" /></label>
+        <label>Duration (s, 0=until stop) <input id="duration" type="number" min="0" value="120" /></label>
+        <label>Max tokens <input id="maxTokens" type="number" min="1" value="128" /></label>
+        <label>Temperature <input id="temperature" type="number" min="0" step="0.1" value="0.7" /></label>
+        <label>Think time (ms) <input id="thinkMs" type="number" min="0" value="0" /></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn" disabled>Stop</button>
+      </div>
+      <div style="margin-top:8px">
+        <label class="muted">Prompt</label>
+        <textarea id="prompt">Write a short paragraph about distributed systems.</textarea>
+      </div>
+      <p class="muted" id="statusLine">Idle.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Live Metrics</h2>
+      <div class="grid" id="metrics"></div>
+      <canvas id="chart" width="1100" height="220" style="margin-top:10px"></canvas>
+    </div>
+
+    <div class="panel">
+      <h2>Per Client</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Client</th><th>In-Flight</th><th>Req</th><th>OK</th><th>Fail</th><th>Avg Lat (ms)</th><th>P95 (ms)</th><th>Avg TTFT (ms)</th>
+          </tr>
+        </thead>
+        <tbody id="clientsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Top Errors</h2>
+      <div id="errors" class="muted">(none)</div>
+    </div>
+  </div>
+
+  <script src="stress.js"></script>
+</body>
+</html>

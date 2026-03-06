@@ -1,9 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -96,8 +98,10 @@ class ProcessManager:
         name = f"{self.config.container_name_prefix}-{model_id}-{gpu_id}"
         log_file = os.path.join(self.config.process_logs_dir, f"{name}.log")
 
+        vllm_executable = self._resolve_vllm_executable()
+
         cmd: list[str] = [
-            self.config.vllm_executable,
+            vllm_executable,
             "serve",
             model_ref,
             "--host",
@@ -134,6 +138,12 @@ class ProcessManager:
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
             )
+        except FileNotFoundError as exc:
+            log_handle.close()
+            raise RuntimeError(
+                f"vLLM executable not found: {vllm_executable!r}. "
+                "Install vLLM in the current environment or set VLLM_EXECUTABLE correctly."
+            ) from exc
         except Exception:
             log_handle.close()
             raise
@@ -206,6 +216,25 @@ class ProcessManager:
         with self._lock:
             found = self._processes.get(process_id)
             return found[0] if found else None
+
+    def _resolve_vllm_executable(self) -> str:
+        configured = self.config.vllm_executable.strip()
+        if not configured:
+            configured = "vllm"
+
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+
+        if os.path.sep in configured:
+            return configured
+
+        py_bin_dir = os.path.dirname(sys.executable)
+        sibling = os.path.join(py_bin_dir, configured)
+        if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+            return sibling
+
+        return configured
 
     @staticmethod
     def _can_bind(port: int) -> bool:
