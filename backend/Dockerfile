@@ -1,12 +1,5 @@
 ﻿# syntax=docker/dockerfile:1
 
-FROM node:20-bookworm-slim AS frontend-build
-WORKDIR /src/front
-COPY front/package*.json ./
-RUN npm install
-COPY front/ ./
-RUN mkdir -p /dist && cp -r public/. /dist/
-
 FROM vllm/vllm-openai:latest AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -19,7 +12,7 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./
-COPY --from=frontend-build /dist/ ./app/static/front/
+COPY front/public/. ./app/static/front/
 COPY runpod-start.sh /app/runpod-start.sh
 RUN chmod +x /app/runpod-start.sh
 
