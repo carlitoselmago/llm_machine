@@ -24,11 +24,16 @@ if [[ ! -x .venv/bin/python ]]; then
   "$PYTHON_BIN" -m venv .venv
 fi
 
+REQ_FILE="backend/requirements.txt"
+if [[ -s "$ROOT_DIR/requirements-dev.txt" ]]; then
+  REQ_FILE="requirements-dev.txt"
+fi
+
 if [[ "${SKIP_PIP_INSTALL:-0}" == "1" ]]; then
   echo "[dev-local] Skipping pip install (SKIP_PIP_INSTALL=1)"
 else
-  echo "[dev-local] Installing/updating Python dependencies..."
-  ./.venv/bin/python -m pip install --disable-pip-version-check -r backend/requirements.txt
+  echo "[dev-local] Installing/updating Python dependencies from $REQ_FILE..."
+  ./.venv/bin/python -m pip install --disable-pip-version-check -r "$REQ_FILE"
 fi
 
 export PATH="$ROOT_DIR/.venv/bin:$PATH"

@@ -34,6 +34,7 @@ class AppServices:
     process_manager: ProcessManager
     http_client: httpx.AsyncClient
     _ops_lock: threading.RLock = field(default_factory=threading.RLock)
+    _repo_files_cache: dict[str, set[str] | None] = field(default_factory=dict)
 
     @classmethod
     def create(cls) -> "AppServices":
@@ -112,6 +113,7 @@ class AppServices:
                 "host_port": rec.host_port,
                 "served_model_name": rec.served_model_name,
                 "log_file": rec.log_file,
+                "log_tail": self.process_manager.get_log_tail(rec.process_id, max_lines=25),
             }
             for rec in self.process_manager.list_managed_processes()
         ]
@@ -230,16 +232,99 @@ class AppServices:
             return
         items.append(candidate)
 
+    @staticmethod
+    def _looks_like_local_path(value: str) -> bool:
+        if not value:
+            return False
+        if os.path.isabs(value):
+            return True
+        if re.match(r"^[A-Za-z]:[\\/]", value):
+            return True
+        if value.startswith("./") or value.startswith(".\\") or value.startswith("../") or value.startswith("..\\"):
+            return True
+        if "\\" in value:
+            return True
+        return os.path.exists(value)
+
+    @staticmethod
+    def _is_hf_repo_id(value: str) -> bool:
+        return bool(re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$", value))
+
+    @staticmethod
+    def _tokenizer_file_markers() -> tuple[str, ...]:
+        return (
+            "tokenizer.json",
+            "tokenizer.model",
+            "tokenizer_config.json",
+            "spiece.model",
+            "sentencepiece.bpe.model",
+            "vocab.json",
+            "merges.txt",
+        )
+
+    def _local_has_tokenizer_files(self, local_path: str) -> bool:
+        try:
+            files = {name.lower() for name in os.listdir(local_path) if os.path.isfile(os.path.join(local_path, name))}
+        except OSError:
+            return False
+        markers = set(self._tokenizer_file_markers())
+        if files.intersection(markers):
+            return True
+        if "vocab.json" in files and "merges.txt" in files:
+            return True
+        return False
+
+    def _list_repo_files_cached(self, repo_id: str) -> set[str] | None:
+        cached = self._repo_files_cache.get(repo_id)
+        if cached is not None or repo_id in self._repo_files_cache:
+            return cached
+
+        def _list_with_token(token: str | None) -> list[str]:
+            api = HfApi(token=token)
+            try:
+                return api.list_repo_files(repo_id=repo_id, repo_type="model")
+            except TypeError:
+                return api.list_repo_files(repo_id=repo_id)
+
+        files: set[str] | None = None
+        try:
+            listed = _list_with_token(self.config.hf_token)
+            files = {os.path.basename(path).lower() for path in listed}
+        except Exception:
+            try:
+                listed = _list_with_token(None)
+                files = {os.path.basename(path).lower() for path in listed}
+            except Exception:
+                files = None
+
+        self._repo_files_cache[repo_id] = files
+        return files
+
+    def _repo_has_tokenizer_files(self, repo_id: str) -> bool:
+        files = self._list_repo_files_cached(repo_id)
+        if not files:
+            return False
+        markers = set(self._tokenizer_file_markers())
+        if files.intersection(markers):
+            return True
+        if "vocab.json" in files and "merges.txt" in files:
+            return True
+        return False
+
     def _expand_tokenizer_candidates(self, initial_candidates: list[str]) -> list[str]:
         expanded: list[str] = []
         for candidate in initial_candidates:
             self._add_unique(expanded, candidate)
-            if "/" in candidate:
+            if self._is_hf_repo_id(candidate):
                 self._add_unique(expanded, candidate.split("/", 1)[1])
 
         seed_values = list(expanded)
         for candidate in seed_values:
-            slug = candidate.split("/", 1)[1] if "/" in candidate else candidate
+            if self._looks_like_local_path(candidate):
+                continue
+            if "\\" in candidate or ":" in candidate:
+                continue
+            slug = candidate.split("/", 1)[1] if self._is_hf_repo_id(candidate) else candidate
             parts = [part for part in re.split(r"[-_]+", slug) if part]
             for end_idx in range(len(parts), 0, -1):
                 self._add_unique(expanded, "-".join(parts[:end_idx]))
@@ -280,32 +365,40 @@ class AppServices:
         if not candidates:
             raise RuntimeError(f"Could not determine tokenizer reference for model {model_id}")
 
-        try:
-            from transformers import AutoTokenizer  # type: ignore
-        except Exception:
-            selected = candidates[0]
-            logger.info("Tokenizer candidates for %s: %s (validation unavailable)", model_id, candidates)
+        validated: list[str] = []
+        for ref in candidates:
+            if self._looks_like_local_path(ref):
+                if self._local_has_tokenizer_files(ref):
+                    validated.append(ref)
+                continue
+            if self._is_hf_repo_id(ref) and self._repo_has_tokenizer_files(ref):
+                validated.append(ref)
+
+        if validated:
+            selected = validated[0]
+            logger.info("Tokenizer candidates for %s: %s", model_id, candidates)
             logger.info("Selected tokenizer for %s: %s", model_id, selected)
             return selected
 
-        errors: list[str] = []
+        # Best-effort fallback: choose the first non-local candidate to let vLLM
+        # attempt resolver logic instead of failing preflight here.
         for ref in candidates:
-            try:
-                AutoTokenizer.from_pretrained(ref, trust_remote_code=True)
-                logger.info("Tokenizer candidates for %s: %s", model_id, candidates)
-                logger.info("Selected tokenizer for %s: %s", model_id, ref)
+            if not self._looks_like_local_path(ref):
+                logger.warning(
+                    "No tokenizer artifact match for %s; falling back to non-local candidate: %s",
+                    model_id,
+                    ref,
+                )
                 return ref
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{ref}: {exc}")
 
-        if tokenizer_override:
-            raise RuntimeError(
-                f"Tokenizer override '{tokenizer_override}' is invalid. Validation errors: {' | '.join(errors[-3:])}"
-            )
-        raise RuntimeError(
-            f"No valid tokenizer source found for {model_id}. Tried: {', '.join(candidates)}. "
-            f"Last errors: {' | '.join(errors[-3:])}"
+        # Last fallback to keep behavior deterministic.
+        selected = candidates[0]
+        logger.warning(
+            "No tokenizer artifact match for %s; falling back to first candidate: %s",
+            model_id,
+            selected,
         )
+        return selected
 
     def _resolve_model_launch_spec(
         self,

@@ -100,6 +100,22 @@ curl http://<pod-ip>:8080/v1/chat/completions \
 
 Local dev scripts remain available (`dev-local.bat`, `dev-local.sh`) for UI/backend iteration.
 
+- Windows: `.\dev-local.bat`
+- Linux/macOS: `./dev-local.sh`
+
+These scripts install `requirements-dev.txt` (which includes `fastapi` + `uvicorn`) and then start:
+
+`http://localhost:8080`
+
+Starting/stopping models from `/admin` also requires a working `vllm` executable in the local environment.
+If `vllm` is missing, UI/API still run, but model runtime actions will fail.
+
+On Windows, the practical options are:
+- run model runtimes on RunPod/Linux and use the frontend API URL field
+- or run local dev under WSL2/Linux where `vllm` is available
+
+Native Windows is not a supported local runtime target for vLLM. Use Windows only for UI/backend iteration, or use WSL2/Linux/RunPod for actual model startup.
+
 ## Limitations
 
 - Single machine only

@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import importlib.util
 import threading
 import time
 import uuid
@@ -98,6 +99,7 @@ class ProcessManager:
         name = f"{self.config.container_name_prefix}-{model_id}-{gpu_id}"
         log_file = os.path.join(self.config.process_logs_dir, f"{name}.log")
 
+        self._validate_vllm_runtime()
         vllm_executable = self._resolve_vllm_executable()
 
         cmd: list[str] = [
@@ -212,6 +214,9 @@ class ProcessManager:
                 return port
         raise RuntimeError("No free host port available in configured range")
 
+    def get_log_tail(self, runtime_id: str, max_lines: int = 40) -> str:
+        return self._log_tail(runtime_id, max_lines=max_lines)
+
     def _process_by_id(self, process_id: str) -> subprocess.Popen[bytes] | None:
         with self._lock:
             found = self._processes.get(process_id)
@@ -235,6 +240,18 @@ class ProcessManager:
             return sibling
 
         return configured
+
+    @staticmethod
+    def _validate_vllm_runtime() -> None:
+        if sys.platform.startswith("win"):
+            spec = importlib.util.find_spec("vllm._C")
+            if spec is None:
+                raise RuntimeError(
+                    "Local model start is not supported in this Windows environment because "
+                    "vLLM native extensions are unavailable (`vllm._C` missing). "
+                    "Official vLLM docs state that vLLM does not support Windows natively. "
+                    "Use WSL2/Linux for local orchestration, or run model runtimes on RunPod."
+                )
 
     @staticmethod
     def _can_bind(port: int) -> bool:
