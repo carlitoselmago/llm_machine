@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ from .services import AppServices
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["openai"])
+CONTEXT_SAFETY_TOKENS = 32
 
 
 def openai_error(status_code: int, message: str, *, error_type: str = "invalid_request_error", code: str | None = None) -> JSONResponse:
@@ -25,6 +27,56 @@ def openai_error(status_code: int, message: str, *, error_type: str = "invalid_r
 def _filtered_headers(headers: dict[str, str]) -> dict[str, str]:
     hop_by_hop = {"host", "connection", "content-length"}
     return {k: v for k, v in headers.items() if k.lower() not in hop_by_hop}
+
+
+def _extract_error_message(body: bytes) -> str | None:
+    if not body:
+        return None
+    try:
+        data = json.loads(body.decode("utf-8", errors="replace"))
+    except Exception:
+        return body.decode("utf-8", errors="replace")
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return error["message"]
+        detail = data.get("detail")
+        if isinstance(detail, str):
+            return detail
+    if isinstance(data, str):
+        return data
+    return body.decode("utf-8", errors="replace")
+
+
+def _extract_context_limit(message: str | None) -> int | None:
+    if not message:
+        return None
+    patterns = (
+        r"max_total_tokens=(\d+)",
+        r"max_model_len[^0-9]*(\d+)",
+        r"context length is only\s+(\d+)\s+tokens",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            try:
+                limit = int(match.group(1))
+            except ValueError:
+                return None
+            return limit if limit > 0 else None
+    return None
+
+
+def _adjust_max_tokens(payload: dict[str, Any], limit: int) -> dict[str, Any] | None:
+    requested = payload.get("max_tokens")
+    if not isinstance(requested, int) or requested < 1:
+        return None
+    adjusted = max(1, limit - CONTEXT_SAFETY_TOKENS)
+    if adjusted >= requested:
+        return None
+    retried = dict(payload)
+    retried["max_tokens"] = adjusted
+    return retried
 
 
 def _directory_size_bytes(path: str) -> int | None:
@@ -68,14 +120,46 @@ async def forward_openai_request(
     headers = _filtered_headers(incoming_headers or {})
     headers.setdefault("content-type", "application/json")
 
+    async def send_upstream(request_payload: dict[str, Any]) -> httpx.Response | None:
+        try:
+            request = services.http_client.build_request("POST", url, json=request_payload, headers=headers)
+            return await services.http_client.send(request, stream=True)
+        except httpx.TimeoutException:
+            return None
+        except httpx.HTTPError as exc:
+            logger.exception("Upstream request failed for model %s", requested_model)
+            raise RuntimeError(f"Upstream model request failed: {exc}") from exc
+
     try:
-        request = services.http_client.build_request("POST", url, json=upstream_payload, headers=headers)
-        upstream = await services.http_client.send(request, stream=True)
-    except httpx.TimeoutException:
+        upstream = await send_upstream(upstream_payload)
+        if upstream is None:
+            return openai_error(504, "Upstream model request timed out", error_type="timeout_error")
+    except RuntimeError as exc:
+        return openai_error(502, str(exc), error_type="upstream_error")
+
+    if upstream.status_code == 400:
+        error_body = await upstream.aread()
+        error_message = _extract_error_message(error_body)
+        await upstream.aclose()
+        context_limit = _extract_context_limit(error_message)
+        adjusted_payload = _adjust_max_tokens(upstream_payload, context_limit) if context_limit is not None else None
+        if adjusted_payload is not None:
+            logger.info(
+                "Retrying %s for model %s with reduced max_tokens=%s after context limit error",
+                path,
+                requested_model,
+                adjusted_payload.get("max_tokens"),
+            )
+            try:
+                upstream = await send_upstream(adjusted_payload)
+                if upstream is None:
+                    return openai_error(504, "Upstream model request timed out", error_type="timeout_error")
+            except RuntimeError as exc:
+                return openai_error(502, str(exc), error_type="upstream_error")
+        else:
+            return Response(content=error_body, status_code=400, media_type="application/json")
+    elif upstream is None:
         return openai_error(504, "Upstream model request timed out", error_type="timeout_error")
-    except httpx.HTTPError as exc:
-        logger.exception("Upstream request failed for model %s", requested_model)
-        return openai_error(502, f"Upstream model request failed: {exc}", error_type="upstream_error")
 
     if payload.get("stream") is True:
         response_headers = {}
