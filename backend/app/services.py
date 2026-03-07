@@ -216,12 +216,18 @@ class AppServices:
         return None
 
     @staticmethod
-    def _base_model_from_repo_name(repo_id: str) -> str | None:
-        name = repo_id.split("/", 1)[1] if "/" in repo_id else repo_id
-        stripped = re.sub(r"(?i)[._-]?gguf.*$", "", name).strip("._- ")
-        if stripped and "/" not in stripped:
-            return stripped
-        return None
+    def _base_model_candidates_from_repo_name(repo_id: str) -> list[str]:
+        owner, _, name = repo_id.partition("/")
+        base_name = name or owner
+        stripped = re.sub(r"(?i)[._-]?gguf.*$", "", base_name).strip("._- ")
+        if not stripped:
+            return []
+
+        candidates: list[str] = []
+        if owner and name and stripped != name:
+            candidates.append(f"{owner}/{stripped}")
+        candidates.append(stripped)
+        return candidates
 
     @staticmethod
     def _add_unique(items: list[str], value: str | None) -> None:
@@ -354,7 +360,8 @@ class AppServices:
         self._add_unique(candidates, local_path)
         self._add_unique(candidates, self._extract_base_model_from_readme(local_path))
         self._add_unique(candidates, self._infer_base_model_from_repo_metadata(repo_id))
-        self._add_unique(candidates, self._base_model_from_repo_name(repo_id))
+        for candidate in self._base_model_candidates_from_repo_name(repo_id):
+            self._add_unique(candidates, candidate)
 
         self._add_unique(candidates, repo_id)
         if "/" not in repo_id and "_" in repo_id:
@@ -380,12 +387,13 @@ class AppServices:
             logger.info("Selected tokenizer for %s: %s", model_id, selected)
             return selected
 
-        # Best-effort fallback: choose the first non-local candidate to let vLLM
-        # attempt resolver logic instead of failing preflight here.
+        # Best-effort fallback: only choose valid HF repo ids here. Bare slugs
+        # like "Ninja-v1-NSFW" are not valid model identifiers and just create
+        # noisier downstream failures.
         for ref in candidates:
-            if not self._looks_like_local_path(ref):
+            if self._is_hf_repo_id(ref):
                 logger.warning(
-                    "No tokenizer artifact match for %s; falling back to non-local candidate: %s",
+                    "No tokenizer artifact match for %s; falling back to repo candidate: %s",
                     model_id,
                     ref,
                 )
