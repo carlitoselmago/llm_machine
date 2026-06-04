@@ -1,17 +1,44 @@
 {
   "name": "llm-web",
   "version": "1.0.0",
-  "type": "module",
+  "main": "main.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "electron .",
+    "build": "electron-builder --win --x64"
   },
   "dependencies": {
     "@fastify/static": "^9.0.0",
     "fastify": "^5.7.4"
   },
-  "main": "server.js",
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.gerineldo.app",
+    "productName": "Gerineldo",
+    "files": [
+      "main.js",
+      "server.js",
+      "public/**/*",
+      "node_modules/**/*",
+      "!node_modules/.cache"
+    ],
+    "asarUnpack": [
+      "public/**/*"
+    ],
+    "win": {
+      "target": {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    },
+    "portable": {
+      "artifactName": "Gerineldo.exe"
+    }
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "description": "Gerineldo LLM frontend"
 }

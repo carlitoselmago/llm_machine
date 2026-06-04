@@ -1,29 +1,24 @@
-import Fastify from "fastify";
-import path from "path";
-import { fileURLToPath } from "url";
+"use strict";
+
+const Fastify = require("fastify");
+const path = require("path");
 
 const fastify = Fastify({ logger: true });
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 /* ========= CONFIG ========= */
 
 // LM Studio / OpenAI-compatible endpoint
 // example: http://10.0.0.5:1234/v1/completions
 const LLM_API_URL = "http://127.0.0.1:1234/v1/completions";
-//const LLM_API_URL = "http://192.168.100.133:11434/api/generate"; //ollama test
 // Optional API key (LM Studio usually ignores it)
 const LLM_API_KEY = "";
 
 /* ========= STATIC FRONTEND ========= */
 
-fastify.register(import("@fastify/static"), {
+fastify.register(require("@fastify/static"), {
   root: path.join(__dirname, "public"),
   prefix: "/"
 });
-
-
 
 /* ========= API ========= */
 
@@ -56,103 +51,28 @@ fastify.post("/api/complete", async (request, reply) => {
   };
 
   try {
-    /*
     const res = await fetch(LLM_API_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(LLM_API_KEY && { Authorization: `Bearer ${LLM_API_KEY}` })
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
 
-    const data = await res.json();
-
-    reply.send(data);
-  } catch (err) {
-    fastify.log.error(err);
-    reply.code(500).send({ error: "LLM backend error" });
-  }
-    */
-   const res = await fetch(LLM_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-
-  reply.raw.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive"
-  });
-
-  for await (const chunk of res.body) {
-    reply.raw.write(chunk);
-  }
-
-  reply.raw.end();
-  } catch (err) {
-    fastify.log.error(err);
-    reply.code(500).send({ error: "LLM backend error" });
-  }
-});
-
-/*
-//Ollama
-fastify.post("/api/complete", async (request, reply) => {
-  const {
-    prompt = "",
-    model = "qwen-neurotic-es-completion:latest",
-    temperature = 0.7,
-    max_tokens = 20,
-    top_p = 1,
-    frequency_penalty = 0,
-    presence_penalty = 0
-  } = request.body;
-
-  if (!prompt.trim()) {
-    return reply.code(400).send({ error: "Prompt is empty" });
-  }
-
-  let ollamaResponse;
-
-  try {
-    ollamaResponse = await fetch(LLM_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        prompt,
-        stream: false,
-        num_predict: max_tokens,
-        options: {
-          temperature,
-          top_p,
-          repeat_penalty: Math.max(
-            1.0,
-            1.0 + frequency_penalty + presence_penalty
-          )
-        }
-      })
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive"
     });
+
+    for await (const chunk of res.body) {
+      reply.raw.write(chunk);
+    }
+
+    reply.raw.end();
   } catch (err) {
-    return reply.code(502).send({ error: "Ollama not reachable" });
+    fastify.log.error(err);
+    reply.code(500).send({ error: "LLM backend error" });
   }
-
-  if (!ollamaResponse.ok) {
-    const text = await ollamaResponse.text();
-    return reply.code(500).send({ error: text });
-  }
-
-  const data = await ollamaResponse.json();
-
-  reply.send({
-    text: data.response ?? ""
-  });
 });
-*/
 
 fastify.post("/api/respond", async (request, reply) => {
   const {
@@ -206,7 +126,13 @@ fastify.get("/api/models", async (request, reply) => {
 
 const PORT = 3000;
 
-fastify.listen({ port: PORT, host: "0.0.0.0" })
-  .then(() => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+async function start() {
+  await fastify.listen({ port: PORT, host: "127.0.0.1" });
+  console.log(`Server running on http://localhost:${PORT}`);
+}
+
+if (require.main === module) {
+  start();
+}
+
+module.exports = { start, PORT };
